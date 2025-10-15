@@ -16,7 +16,6 @@ const productSchema = new mongoose.Schema({
   discount: { type: Number, default: 0 },
   image: { type: [imageSchema], required: true },
   category: { type: String, required: true },
-  subCategory: { type: String, required: true },
   sizes: { type: [String], required: true },
   bestSeller: { type: Boolean, default: false },
   date: { type: Number, required: true },

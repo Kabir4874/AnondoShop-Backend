@@ -27,7 +27,6 @@ const addProduct = async (req, res) => {
       price,
       discount = 0,
       category,
-      subCategory,
       sizes,
       bestSeller,
     } = req.body;
@@ -48,7 +47,6 @@ const addProduct = async (req, res) => {
       price: Number(price),
       discount: Number(discount) || 0,
       category,
-      subCategory,
       sizes: Array.isArray(sizes) ? sizes : JSON.parse(sizes),
       bestSeller: String(bestSeller) === "true",
       image: imageMeta, // [{url, publicId}]
@@ -75,7 +73,6 @@ const editProduct = async (req, res) => {
       price,
       discount = 0,
       category,
-      subCategory,
       sizes,
       bestSeller,
       removedPublicIds = "[]",
@@ -121,7 +118,6 @@ const editProduct = async (req, res) => {
     if (price !== undefined) product.price = Number(price);
     if (discount !== undefined) product.discount = Number(discount) || 0;
     if (category !== undefined) product.category = category;
-    if (subCategory !== undefined) product.subCategory = subCategory;
 
     if (sizes !== undefined) {
       product.sizes = Array.isArray(sizes) ? sizes : JSON.parse(sizes);

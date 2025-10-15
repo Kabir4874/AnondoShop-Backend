@@ -109,4 +109,92 @@ const loginAdmin = async (req, res) => {
   }
 };
 
-export { loginUser, registerUser, loginAdmin };
+const saveOrUpdateAddress = async (req, res) => {
+  try {
+    const userId = req.userId || req.body.userId;
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Unauthorized" });
+    }
+
+    const { recipientName, phone, addressLine1, district, postalCode } =
+      req.body || {};
+
+    if (!recipientName || !phone || !addressLine1 || !district || !postalCode) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "recipientName, phone, addressLine1, district and postalCode are required",
+      });
+    }
+
+    const address = {
+      recipientName,
+      phone,
+      addressLine1,
+      district,
+      postalCode,
+    };
+
+    const updatedUser = await userModel.findByIdAndUpdate(
+      userId,
+      { address },
+      { new: true, runValidators: true }
+    );
+
+    if (!updatedUser) {
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Address saved successfully",
+      address: updatedUser.address,
+    });
+  } catch (error) {
+    console.error("Error saving/updating address:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+const getUserProfile = async (req, res) => {
+  try {
+    const userId = req.body.userId;
+    if (!userId) {
+      return res
+        .status(401)
+        .json({ success: false, message: "Unauthorized: No user ID found" });
+    }
+
+    const user = await userModel
+      .findById(userId)
+      .select("name email address")
+      .lean();
+
+    if (!user) {
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
+    }
+
+    return res.status(200).json({
+      success: true,
+      user,
+    });
+  } catch (error) {
+    console.error("Error fetching user profile:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to load user profile",
+    });
+  }
+};
+
+export {
+  getUserProfile,
+  loginAdmin,
+  loginUser,
+  registerUser,
+  saveOrUpdateAddress,
+};

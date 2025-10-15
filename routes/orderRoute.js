@@ -1,8 +1,7 @@
-// routes/orderroutes.js
 import express from "express";
 import {
   allOrders,
-  // SSLCommerz handlers
+  courierCheck,
   initiateSslPayment,
   placeOrder,
   sslCancel,
@@ -36,5 +35,7 @@ orderRouter.post("/ssl/success", sslSuccess);
 orderRouter.post("/ssl/fail", sslFail);
 orderRouter.post("/ssl/cancel", sslCancel);
 orderRouter.post("/ssl/ipn", sslIpn);
+
+orderRouter.post("/courier/check", adminAuth, courierCheck);
 
 export default orderRouter;
