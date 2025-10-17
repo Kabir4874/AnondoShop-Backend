@@ -125,14 +125,6 @@ const initiateSslPayment = async (req, res) => {
     });
 
     // 2) Prepare SSLCommerz payload using minimal BD address
-    // Map to SSL fields:
-    // cus_name: recipientName
-    // cus_phone: phone
-    // cus_add1: addressLine1
-    // cus_city / ship_city: district (closest match for city/state)
-    // cus_state / ship_state: district
-    // cus_postcode / ship_postcode: postalCode
-    // country: Bangladesh
     const tran_id = generateTransactionId();
     const baseUrl = `${req.protocol}://${req.get("host")}`;
 
@@ -309,15 +301,57 @@ const updateStatus = async (req, res) => {
   }
 };
 
-/* ----------------------- Courier: Delivery Rate Check ----------------------- */
+/* ----------------------- NEW: Update Order Address (Admin) ----------------------- */
 /**
- * POST /api/order/courier/check
- * Headers: { token }  (protected)
- * Body: { phone }
- *
- * Calls external API: https://bdcourier.com/api/courier-check
- * Auth: Authorization: Bearer <COURIER_API>
+ * POST /api/order/update-address
+ * Headers: { token }  (admin protected via route middleware)
+ * Body: { orderId, address: { recipientName, phone, addressLine1, district, postalCode } }
  */
+const updateOrderAddress = async (req, res) => {
+  try {
+    const { orderId, address } = req.body || {};
+    if (!orderId || !address) {
+      return res
+        .status(400)
+        .json({ success: false, message: "orderId and address are required" });
+    }
+
+    const err = validateBdAddress(address);
+    if (err) {
+      return res.status(400).json({ success: false, message: err });
+    }
+
+    const order = await orderModel.findById(orderId);
+    if (!order) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
+    }
+
+    order.address = {
+      recipientName: address.recipientName,
+      phone: address.phone,
+      addressLine1: address.addressLine1,
+      district: address.district,
+      postalCode: address.postalCode,
+    };
+
+    await order.save();
+
+    return res.json({
+      success: true,
+      message: "Address updated successfully",
+      order,
+    });
+  } catch (error) {
+    console.error("updateOrderAddress:", error);
+    return res
+      .status(500)
+      .json({ success: false, message: error.message || "Server error" });
+  }
+};
+
+/* ----------------------- Courier: Delivery Rate Check ----------------------- */
 const courierCheck = async (req, res) => {
   try {
     const { phone } = req.body || {};
@@ -360,16 +394,22 @@ const courierCheck = async (req, res) => {
 export {
   // lists/updates
   allOrders,
-  // courier
-  courierCheck,
-  // SSL
-  initiateSslPayment,
+  updateStatus,
+  userOrders,
+
   // core
   placeOrder,
+
+  // address
+  updateOrderAddress,
+
+  // SSL
+  initiateSslPayment,
   sslCancel,
   sslFail,
   sslIpn,
   sslSuccess,
-  updateStatus,
-  userOrders,
+
+  // courier
+  courierCheck,
 };

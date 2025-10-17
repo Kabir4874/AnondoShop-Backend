@@ -6,6 +6,7 @@ import {
   registerUser,
   saveOrUpdateAddress,
 } from "../controllers/userController.js";
+import adminAuth from "../middleware/adminAuth.js";
 import authUser from "../middleware/auth.js";
 
 const userRouter = express.Router();

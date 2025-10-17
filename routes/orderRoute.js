@@ -8,6 +8,7 @@ import {
   sslFail,
   sslIpn,
   sslSuccess,
+  updateOrderAddress,
   updateStatus,
   userOrders,
 } from "../controllers/orderController.js";
@@ -37,5 +38,6 @@ orderRouter.post("/ssl/cancel", sslCancel);
 orderRouter.post("/ssl/ipn", sslIpn);
 
 orderRouter.post("/courier/check", adminAuth, courierCheck);
+orderRouter.post("/update-address", adminAuth, updateOrderAddress);
 
 export default orderRouter;
