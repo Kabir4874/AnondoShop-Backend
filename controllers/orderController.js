@@ -1,6 +1,7 @@
 import axios from "axios";
 import SSLCommerzPayment from "sslcommerz-lts";
 import orderModel from "../models/orderModel.js";
+import productModel from "../models/productModel.js";
 import userModel from "../models/userModel.js";
 
 const store_id = process.env.SSLCZ_STORE_ID;
@@ -9,7 +10,6 @@ const is_live = (process.env.SSLCZ_IS_LIVE || "false") === "true";
 const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173";
 const COURIER_API = process.env.COURIER_API;
 
-/* ----------------------- Utilities ----------------------- */
 function generateTransactionId() {
   const ts = Date.now().toString();
   const rnd = Math.random().toString(36).substring(2, 8);
@@ -31,35 +31,137 @@ function validateBdAddress(addr) {
   return null;
 }
 
-/* ----------------------- COD ----------------------- */
+function isXXL(size) {
+  if (!size) return false;
+  const s = String(size).toUpperCase();
+  return s.startsWith("XXL");
+}
+
+function computeDeliveryFee(address) {
+  if (!address) return { fee: 150, label: "Other" };
+  const d = String(address.district || "")
+    .toLowerCase()
+    .trim();
+  const line = String(address.addressLine1 || "").toLowerCase();
+
+  if (d === "dhaka") {
+    return { fee: 80, label: "Dhaka" };
+  }
+  if (d === "gazipur") {
+    return { fee: 120, label: "Gazipur" };
+  }
+
+  const isSavar = d.includes("savar") || line.includes("savar");
+  const isAshulia =
+    d.includes("ashulia") ||
+    d.includes("asulia") ||
+    line.includes("ashulia") ||
+    line.includes("asulia");
+
+  if (isSavar || isAshulia) {
+    return { fee: 120, label: "Savar/Ashulia" };
+  }
+
+  return { fee: 150, label: "Other" };
+}
+
+function normalizeItems(items) {
+  if (!Array.isArray(items)) return [];
+  return items.map((it) => {
+    const productId = it._id || it.productId || it.id;
+    return {
+      productId: String(productId),
+      size: it.size,
+      quantity: Number(it.quantity || 0),
+    };
+  });
+}
+
+async function computeTotalsFromDB(items, address) {
+  const norm = normalizeItems(items).filter(
+    (x) => x.productId && x.quantity > 0
+  );
+  if (norm.length === 0) {
+    throw new Error("No valid items provided");
+  }
+
+  const productIds = [...new Set(norm.map((x) => x.productId))];
+  const products = await productModel
+    .find({ _id: { $in: productIds } })
+    .select("_id name price discount")
+    .lean();
+
+  const pmap = new Map(products.map((p) => [String(p._id), p]));
+
+  let subtotal = 0;
+  const lines = [];
+
+  for (const it of norm) {
+    const prod = pmap.get(it.productId);
+    if (!prod) {
+      throw new Error("One or more products no longer available");
+    }
+
+    const unitBase = Number(prod.price) || 0;
+    const unitDisc = Number(prod.discount) || 0;
+    const unitFinal =
+      unitDisc > 0
+        ? Math.max(0, unitBase - (unitBase * unitDisc) / 100)
+        : unitBase;
+
+    let lineSubtotal = unitFinal * it.quantity;
+
+    let xxlSurchargeApplied = 0;
+    if (isXXL(it.size)) {
+      xxlSurchargeApplied = 50 * it.quantity;
+      lineSubtotal += xxlSurchargeApplied;
+    }
+
+    subtotal += lineSubtotal;
+
+    lines.push({
+      productId: it.productId,
+      name: prod.name,
+      size: it.size,
+      quantity: it.quantity,
+      unitBase,
+      unitDiscount: unitDisc,
+      unitFinal,
+      lineSubtotal,
+      xxlSurchargeApplied,
+    });
+  }
+
+  const { fee: deliveryFee, label: deliveryLabel } =
+    computeDeliveryFee(address);
+  const computedAmount = subtotal + deliveryFee;
+
+  return { computedAmount, deliveryFee, deliveryLabel, lines };
+}
+
 const placeOrder = async (req, res) => {
   try {
     const userId = req.userId || req.body.userId; // set by authUser
-    const { items, amount, address } = req.body;
+    const { items, address } = req.body;
 
     if (!userId) {
       return res
         .status(401)
         .json({ success: false, message: "Unauthorized: userId missing" });
     }
-    if (!Array.isArray(items) || items.length === 0 || !amount) {
-      return res.status(400).json({
-        success: false,
-        message: "items and amount are required",
-      });
-    }
-
-    // Validate BD address (new minimal schema)
+    // Validate BD address
     const addrError = validateBdAddress(address);
     if (addrError) {
       return res.status(400).json({ success: false, message: addrError });
     }
+    // Compute totals from DB (authoritative)
+    const { computedAmount, lines } = await computeTotalsFromDB(items, address);
 
     const orderData = {
       userId,
-      items,
+      items: lines, // store enriched lines (includes price-at-order + surcharge info)
       address, // { recipientName, phone, addressLine1, district, postalCode }
-      amount,
+      amount: computedAmount,
       paymentMethod: "COD",
       payment: false,
       date: Date.now(),
@@ -79,27 +181,15 @@ const placeOrder = async (req, res) => {
   }
 };
 
-/* ----------------------- SSLCommerz: Initiate ----------------------- */
-/**
- * POST /api/order/ssl/initiate
- * Headers: { token } -> authUser sets req.userId
- * Body: { items[], amount, address{recipientName, phone, addressLine1, district, postalCode} }
- */
 const initiateSslPayment = async (req, res) => {
   try {
     const userId = req.userId || req.body.userId;
-    const { items, amount, address } = req.body;
+    const { items, address } = req.body;
 
     if (!userId) {
       return res
         .status(401)
         .json({ success: false, message: "Unauthorized: userId missing" });
-    }
-    if (!Array.isArray(items) || items.length === 0 || !amount) {
-      return res.status(400).json({
-        success: false,
-        message: "items and amount are required",
-      });
     }
 
     // Validate BD address
@@ -108,16 +198,19 @@ const initiateSslPayment = async (req, res) => {
       return res.status(400).json({ success: false, message: addrError });
     }
 
+    // Compute totals from DB (authoritative)
+    const { computedAmount, lines } = await computeTotalsFromDB(items, address);
+
     // Grab user email for SSLCommerz payload fallback
     const user = await userModel.findById(userId).select("email").lean();
     const userEmail = user?.email || "customer@example.com";
 
-    // 1) Create pending order
+    // 1) Create pending order with computed amount
     const newOrder = await orderModel.create({
       userId,
-      items,
+      items: lines,
       address,
-      amount,
+      amount: computedAmount,
       paymentMethod: "SSLCommerz",
       payment: false,
       status: "Order Placed",
@@ -129,7 +222,7 @@ const initiateSslPayment = async (req, res) => {
     const baseUrl = `${req.protocol}://${req.get("host")}`;
 
     const data = {
-      total_amount: amount,
+      total_amount: computedAmount, // <-- authoritative amount
       currency: "BDT",
       tran_id,
       success_url: `${baseUrl}/api/order/ssl/success`,
@@ -190,9 +283,6 @@ const initiateSslPayment = async (req, res) => {
   }
 };
 
-/* ----------------------- SSLCommerz: Callbacks ----------------------- */
-// NOTE: These are NOT behind auth — SSLCommerz posts to them.
-
 const sslSuccess = async (req, res) => {
   try {
     const { value_a: orderId, value_b: userId } = req.body || {};
@@ -250,7 +340,6 @@ const sslCancel = async (req, res) => {
 const sslIpn = async (req, res) => {
   try {
     console.log("SSL IPN:", req.body);
-    // Optional: verify payment using SSLCommerz validation API
     res.status(200).send("OK");
   } catch (error) {
     console.log(error);
@@ -258,7 +347,6 @@ const sslIpn = async (req, res) => {
   }
 };
 
-/* ----------------------- Lists & Updates ----------------------- */
 const allOrders = async (_req, res) => {
   try {
     const orders = await orderModel.find({}).sort({ date: -1 });
@@ -277,8 +365,44 @@ const userOrders = async (req, res) => {
         .status(401)
         .json({ success: false, message: "Unauthorized: userId missing" });
     }
-    const orders = await orderModel.find({ userId }).sort({ date: -1 });
-    res.json({ success: true, orders });
+
+    const orders = await orderModel.find({ userId }).sort({ date: -1 }).lean();
+
+    const idSet = new Set();
+    for (const o of orders) {
+      const items = Array.isArray(o.items) ? o.items : [];
+      for (const it of items) {
+        const pid = String(it.productId || it._id || it.id || "").trim();
+        if (pid) idSet.add(pid);
+      }
+    }
+
+    let productMap = new Map();
+    if (idSet.size > 0) {
+      const ids = [...idSet];
+      const products = await productModel
+        .find({ _id: { $in: ids } })
+        .select("_id image")
+        .lean();
+
+      productMap = new Map(products.map((p) => [String(p._id), p.image]));
+    }
+
+    const ordersWithImages = orders.map((o) => {
+      const items = Array.isArray(o.items) ? o.items : [];
+      const enrichedItems = items.map((it) => {
+        const pid = String(it.productId || it._id || it.id || "").trim();
+        const existingImage = it.image;
+        const productImage = productMap.get(pid);
+        return {
+          ...it,
+          image: existingImage != null ? existingImage : productImage || [],
+        };
+      });
+      return { ...o, items: enrichedItems };
+    });
+
+    return res.json({ success: true, orders: ordersWithImages });
   } catch (error) {
     console.log(error);
     res.json({ success: false, message: error.message });
@@ -301,12 +425,6 @@ const updateStatus = async (req, res) => {
   }
 };
 
-/* ----------------------- NEW: Update Order Address (Admin) ----------------------- */
-/**
- * POST /api/order/update-address
- * Headers: { token }  (admin protected via route middleware)
- * Body: { orderId, address: { recipientName, phone, addressLine1, district, postalCode } }
- */
 const updateOrderAddress = async (req, res) => {
   try {
     const { orderId, address } = req.body || {};
@@ -351,7 +469,6 @@ const updateOrderAddress = async (req, res) => {
   }
 };
 
-/* ----------------------- Courier: Delivery Rate Check ----------------------- */
 const courierCheck = async (req, res) => {
   try {
     const { phone } = req.body || {};
@@ -394,22 +511,18 @@ const courierCheck = async (req, res) => {
 export {
   // lists/updates
   allOrders,
-  updateStatus,
-  userOrders,
-
-  // core
-  placeOrder,
-
-  // address
-  updateOrderAddress,
-
+  // courier
+  courierCheck,
   // SSL
   initiateSslPayment,
+  // core
+  placeOrder,
   sslCancel,
   sslFail,
   sslIpn,
   sslSuccess,
-
-  // courier
-  courierCheck,
+  // address
+  updateOrderAddress,
+  updateStatus,
+  userOrders,
 };
