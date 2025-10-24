@@ -1,6 +1,8 @@
 import express from "express";
 import {
   allOrders,
+  bkashCallback,
+  bkashCreatePayment,
   courierCheck,
   initiateSslPayment,
   placeOrder,
@@ -40,4 +42,6 @@ orderRouter.post("/ssl/ipn", sslIpn);
 orderRouter.post("/courier/check", adminAuth, courierCheck);
 orderRouter.post("/update-address", adminAuth, updateOrderAddress);
 
+orderRouter.post("/bkash/create", authUser, bkashCreatePayment);
+orderRouter.get("/bkash/callback", bkashCallback);
 export default orderRouter;

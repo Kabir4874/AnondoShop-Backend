@@ -1,15 +1,87 @@
+// controllers/orderController.js
 import axios from "axios";
 import SSLCommerzPayment from "sslcommerz-lts";
 import orderModel from "../models/orderModel.js";
 import productModel from "../models/productModel.js";
 import userModel from "../models/userModel.js";
 
+/* ----------------------- ENV / Config ----------------------- */
 const store_id = process.env.SSLCZ_STORE_ID;
 const store_passwd = process.env.SSLCZ_STORE_PASSWORD;
 const is_live = (process.env.SSLCZ_IS_LIVE || "false") === "true";
 const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173";
 const COURIER_API = process.env.COURIER_API;
 
+// bKash Hosted (Normal) Checkout
+const BKASH_CHECKOUT_GRANT_URL = process.env.BKASH_CHECKOUT_GRANT_URL;
+const BKASH_CHECKOUT_CREATE_URL = process.env.BKASH_CHECKOUT_CREATE_URL;
+const BKASH_CHECKOUT_EXECUTE_URL = process.env.BKASH_CHECKOUT_EXECUTE_URL;
+const BKASH_CHECKOUT_CALLBACK_URL = process.env.BKASH_CHECKOUT_CALLBACK_URL;
+
+const BKASH_USERNAME = process.env.BKASH_USERNAME;
+const BKASH_PASSWORD = process.env.BKASH_PASSWORD;
+const BKASH_APP_KEY = process.env.BKASH_APP_KEY;
+const BKASH_APP_SECRET = process.env.BKASH_APP_SECRET;
+
+/* ----------------------- bKash Hosted Token Cache ----------------------- */
+let bkashHostedIdToken = null;
+let bkashHostedTokenExpiry = 0; // epoch ms
+
+async function bkashGrantTokenHosted() {
+  const now = Date.now();
+  if (bkashHostedIdToken && now < bkashHostedTokenExpiry - 30_000) {
+    return bkashHostedIdToken;
+  }
+
+  if (
+    !BKASH_CHECKOUT_GRANT_URL ||
+    !BKASH_USERNAME ||
+    !BKASH_PASSWORD ||
+    !BKASH_APP_KEY ||
+    !BKASH_APP_SECRET
+  ) {
+    throw new Error("bKash Hosted env configuration is missing");
+  }
+
+  try {
+    const { data } = await axios.post(
+      BKASH_CHECKOUT_GRANT_URL,
+      { app_key: BKASH_APP_KEY, app_secret: BKASH_APP_SECRET },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          username: BKASH_USERNAME,
+          password: BKASH_PASSWORD,
+        },
+        timeout: 15000,
+      }
+    );
+
+    if (!data?.id_token) {
+      throw new Error(`bKash grant token failed: ${JSON.stringify(data)}`);
+    }
+
+    bkashHostedIdToken = data.id_token;
+    const expiresIn = Number(data.expires_in || 3600); // seconds
+    bkashHostedTokenExpiry = Date.now() + expiresIn * 1000;
+
+    return bkashHostedIdToken;
+  } catch (err) {
+    const payload = err?.response?.data || err.message;
+    throw new Error(`bKash grant token failed: ${JSON.stringify(payload)}`);
+  }
+}
+
+async function bkashHostedHeaders() {
+  const idToken = await bkashGrantTokenHosted();
+  return {
+    "Content-Type": "application/json",
+    authorization: idToken, // raw token per Hosted docs (not Bearer)
+    "x-app-key": BKASH_APP_KEY,
+  };
+}
+
+/* ----------------------- Helpers ----------------------- */
 function generateTransactionId() {
   const ts = Date.now().toString();
   const rnd = Math.random().toString(36).substring(2, 8);
@@ -39,17 +111,11 @@ function isXXL(size) {
 
 function computeDeliveryFee(address) {
   if (!address) return { fee: 150, label: "Other" };
-  const d = String(address.district || "")
-    .toLowerCase()
-    .trim();
+  const d = String(address.district || "").toLowerCase().trim();
   const line = String(address.addressLine1 || "").toLowerCase();
 
-  if (d === "dhaka") {
-    return { fee: 80, label: "Dhaka" };
-  }
-  if (d === "gazipur") {
-    return { fee: 120, label: "Gazipur" };
-  }
+  if (d === "dhaka") return { fee: 80, label: "Dhaka" };
+  if (d === "gazipur") return { fee: 120, label: "Gazipur" };
 
   const isSavar = d.includes("savar") || line.includes("savar");
   const isAshulia =
@@ -57,10 +123,7 @@ function computeDeliveryFee(address) {
     d.includes("asulia") ||
     line.includes("ashulia") ||
     line.includes("asulia");
-
-  if (isSavar || isAshulia) {
-    return { fee: 120, label: "Savar/Ashulia" };
-  }
+  if (isSavar || isAshulia) return { fee: 120, label: "Savar/Ashulia" };
 
   return { fee: 150, label: "Other" };
 }
@@ -81,16 +144,13 @@ async function computeTotalsFromDB(items, address) {
   const norm = normalizeItems(items).filter(
     (x) => x.productId && x.quantity > 0
   );
-  if (norm.length === 0) {
-    throw new Error("No valid items provided");
-  }
+  if (norm.length === 0) throw new Error("No valid items provided");
 
   const productIds = [...new Set(norm.map((x) => x.productId))];
   const products = await productModel
     .find({ _id: { $in: productIds } })
     .select("_id name price discount")
     .lean();
-
   const pmap = new Map(products.map((p) => [String(p._id), p]));
 
   let subtotal = 0;
@@ -98,9 +158,7 @@ async function computeTotalsFromDB(items, address) {
 
   for (const it of norm) {
     const prod = pmap.get(it.productId);
-    if (!prod) {
-      throw new Error("One or more products no longer available");
-    }
+    if (!prod) throw new Error("One or more products no longer available");
 
     const unitBase = Number(prod.price) || 0;
     const unitDisc = Number(prod.discount) || 0;
@@ -110,8 +168,8 @@ async function computeTotalsFromDB(items, address) {
         : unitBase;
 
     let lineSubtotal = unitFinal * it.quantity;
-
     let xxlSurchargeApplied = 0;
+
     if (isXXL(it.size)) {
       xxlSurchargeApplied = 50 * it.quantity;
       lineSubtotal += xxlSurchargeApplied;
@@ -132,16 +190,16 @@ async function computeTotalsFromDB(items, address) {
     });
   }
 
-  const { fee: deliveryFee, label: deliveryLabel } =
-    computeDeliveryFee(address);
+  const { fee: deliveryFee, label: deliveryLabel } = computeDeliveryFee(address);
   const computedAmount = subtotal + deliveryFee;
 
   return { computedAmount, deliveryFee, deliveryLabel, lines };
 }
 
+/* ----------------------- COD ----------------------- */
 const placeOrder = async (req, res) => {
   try {
-    const userId = req.userId || req.body.userId; // set by authUser
+    const userId = req.userId || req.body.userId;
     const { items, address } = req.body;
 
     if (!userId) {
@@ -149,29 +207,24 @@ const placeOrder = async (req, res) => {
         .status(401)
         .json({ success: false, message: "Unauthorized: userId missing" });
     }
-    // Validate BD address
     const addrError = validateBdAddress(address);
     if (addrError) {
       return res.status(400).json({ success: false, message: addrError });
     }
-    // Compute totals from DB (authoritative)
+
     const { computedAmount, lines } = await computeTotalsFromDB(items, address);
 
-    const orderData = {
+    const newOrder = await orderModel.create({
       userId,
-      items: lines, // store enriched lines (includes price-at-order + surcharge info)
-      address, // { recipientName, phone, addressLine1, district, postalCode }
+      items: lines,
+      address,
       amount: computedAmount,
       paymentMethod: "COD",
       payment: false,
       date: Date.now(),
       status: "Order Placed",
-    };
+    });
 
-    const newOrder = new orderModel(orderData);
-    await newOrder.save();
-
-    // Clear cart after placing order
     await userModel.findByIdAndUpdate(userId, { cartData: {} });
 
     res.json({ success: true, message: "Order Placed", orderId: newOrder._id });
@@ -181,6 +234,7 @@ const placeOrder = async (req, res) => {
   }
 };
 
+/* ----------------------- SSLCommerz ----------------------- */
 const initiateSslPayment = async (req, res) => {
   try {
     const userId = req.userId || req.body.userId;
@@ -191,21 +245,16 @@ const initiateSslPayment = async (req, res) => {
         .status(401)
         .json({ success: false, message: "Unauthorized: userId missing" });
     }
-
-    // Validate BD address
     const addrError = validateBdAddress(address);
     if (addrError) {
       return res.status(400).json({ success: false, message: addrError });
     }
 
-    // Compute totals from DB (authoritative)
     const { computedAmount, lines } = await computeTotalsFromDB(items, address);
 
-    // Grab user email for SSLCommerz payload fallback
     const user = await userModel.findById(userId).select("email").lean();
     const userEmail = user?.email || "customer@example.com";
 
-    // 1) Create pending order with computed amount
     const newOrder = await orderModel.create({
       userId,
       items: lines,
@@ -217,12 +266,11 @@ const initiateSslPayment = async (req, res) => {
       date: Date.now(),
     });
 
-    // 2) Prepare SSLCommerz payload using minimal BD address
     const tran_id = generateTransactionId();
     const baseUrl = `${req.protocol}://${req.get("host")}`;
 
     const data = {
-      total_amount: computedAmount, // <-- authoritative amount
+      total_amount: computedAmount,
       currency: "BDT",
       tran_id,
       success_url: `${baseUrl}/api/order/ssl/success`,
@@ -235,7 +283,6 @@ const initiateSslPayment = async (req, res) => {
       product_category: "Ecommerce",
       product_profile: "general",
 
-      // Customer info
       cus_name: address.recipientName || "Customer",
       cus_email: userEmail,
       cus_add1: address.addressLine1 || "Address Line 1",
@@ -247,7 +294,6 @@ const initiateSslPayment = async (req, res) => {
       cus_phone: address.phone || "01700000000",
       cus_fax: "N/A",
 
-      // Shipping info
       ship_name: address.recipientName || "Shipping",
       ship_add1: address.addressLine1 || "Address Line 1",
       ship_add2: "N/A",
@@ -256,9 +302,8 @@ const initiateSslPayment = async (req, res) => {
       ship_postcode: address.postalCode || "1000",
       ship_country: "Bangladesh",
 
-      // Extra values: returned on callbacks
-      value_a: newOrder._id.toString(), // orderId
-      value_b: userId, // userId
+      value_a: newOrder._id.toString(),
+      value_b: userId,
     };
 
     const sslcz = new SSLCommerzPayment(store_id, store_passwd, is_live);
@@ -347,6 +392,129 @@ const sslIpn = async (req, res) => {
   }
 };
 
+/* ----------------------- bKash Hosted (Normal) Checkout ----------------------- */
+const bkashCreatePayment = async (req, res) => {
+  try {
+    const userId = req.userId || req.body.userId;
+    const { items, address } = req.body;
+
+    if (!userId) {
+      return res
+        .status(401)
+        .json({ success: false, message: "Unauthorized: userId missing" });
+    }
+
+    const addrError = validateBdAddress(address);
+    if (addrError) {
+      return res.status(400).json({ success: false, message: addrError });
+    }
+
+    const { computedAmount, lines } = await computeTotalsFromDB(items, address);
+
+    // Create pending order
+    const order = await orderModel.create({
+      userId,
+      items: lines,
+      address,
+      amount: computedAmount,
+      paymentMethod: "bKash",
+      payment: false,
+      status: "Order Placed",
+      date: Date.now(),
+    });
+
+    const headers = await bkashHostedHeaders();
+    const callbackURL = `${BKASH_CHECKOUT_CALLBACK_URL}?orderId=${order._id}`;
+
+    const body = {
+      amount: String(computedAmount),
+      currency: "BDT",
+      intent: "sale",
+      merchantInvoiceNumber: "Inv" + generateTransactionId(),
+      payerReference: " ",
+      callbackURL,
+    };
+
+    const { data } = await axios.post(BKASH_CHECKOUT_CREATE_URL, body, {
+      headers,
+      timeout: 20000,
+    });
+
+    return res.status(201).json({ success: true, orderId: order._id, data });
+  } catch (error) {
+    console.error(
+      "bkashCreatePayment (Hosted):",
+      error?.response?.data || error.message
+    );
+    return res.status(500).json({
+      success: false,
+      message:
+        error?.response?.data?.message ||
+        error.message ||
+        "bKash Hosted create failed",
+    });
+  }
+};
+
+const bkashCallback = async (req, res) => {
+  try {
+    const { status, paymentID, orderId } = req.query || {};
+
+    if (status !== "success" || !paymentID) {
+      if (orderId) {
+        await orderModel.findByIdAndUpdate(orderId, {
+          status: "Payment Failed",
+        });
+      }
+      return res.redirect(
+        `${CLIENT_URL}/payment-result?status=failed${
+          orderId ? `&orderId=${orderId}` : ""
+        }`
+      );
+    }
+
+    const headers = await bkashHostedHeaders();
+    const execBody = { paymentID };
+
+    const { data: exec } = await axios.post(
+      BKASH_CHECKOUT_EXECUTE_URL,
+      execBody,
+      { headers, timeout: 20000 }
+    );
+
+    if (exec?.statusCode === "0000") {
+      if (orderId) {
+        const order = await orderModel.findByIdAndUpdate(
+          orderId,
+          { payment: true, paymentMethod: "bKash", status: "Paid" },
+          { new: true }
+        );
+        if (order?.userId) {
+          await userModel.findByIdAndUpdate(order.userId, { cartData: {} });
+        }
+      }
+      return res.redirect(
+        `${CLIENT_URL}/payment-result?status=success${
+          orderId ? `&orderId=${orderId}` : ""
+        }`
+      );
+    }
+
+    if (orderId) {
+      await orderModel.findByIdAndUpdate(orderId, { status: "Payment Failed" });
+    }
+    return res.redirect(
+      `${CLIENT_URL}/payment-result?status=failed${
+        orderId ? `&orderId=${orderId}` : ""
+      }`
+    );
+  } catch (e) {
+    console.error("bkashCallback (Hosted):", e?.response?.data || e.message);
+    return res.redirect(`${CLIENT_URL}/payment-result?status=error`);
+  }
+};
+
+/* ----------------------- Lists & Updates ----------------------- */
 const allOrders = async (_req, res) => {
   try {
     const orders = await orderModel.find({}).sort({ date: -1 });
@@ -469,6 +637,7 @@ const updateOrderAddress = async (req, res) => {
   }
 };
 
+/* ----------------------- Courier: Delivery Rate Check ----------------------- */
 const courierCheck = async (req, res) => {
   try {
     const { phone } = req.body || {};
@@ -511,17 +680,20 @@ const courierCheck = async (req, res) => {
 export {
   // lists/updates
   allOrders,
+  // bKash Hosted (Normal) Checkout
+  bkashCreatePayment,
+  bkashCallback,
   // courier
   courierCheck,
   // SSL
   initiateSslPayment,
-  // core
-  placeOrder,
   sslCancel,
   sslFail,
   sslIpn,
   sslSuccess,
-  // address
+  // core
+  placeOrder,
+  // admin helpers
   updateOrderAddress,
   updateStatus,
   userOrders,
