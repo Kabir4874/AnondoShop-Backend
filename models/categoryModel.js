@@ -7,11 +7,20 @@ const slugify = (str) =>
     .replace(/[\s\W-]+/g, "-")
     .replace(/^-+|-+$/g, "");
 
+const imageSchema = new mongoose.Schema(
+  {
+    url: { type: String, default: "" },
+    publicId: { type: String, default: "" },
+  },
+  { _id: false }
+);
+
 const categorySchema = new mongoose.Schema(
   {
     name: { type: String, required: true, unique: true, trim: true },
     slug: { type: String, required: true, unique: true, trim: true },
     isActive: { type: Boolean, default: true },
+    image: { type: imageSchema, default: () => ({ url: "", publicId: "" }) },
   },
   { timestamps: true }
 );

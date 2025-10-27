@@ -1,5 +1,9 @@
+// controllers/categoryController.js
+import { v2 as cloudinary } from "cloudinary";
+import sharp from "sharp";
 import Category from "../models/categoryModel.js";
 
+/* ----------------- helpers ----------------- */
 const slugify = (str) =>
   String(str || "")
     .toLowerCase()
@@ -7,14 +11,59 @@ const slugify = (str) =>
     .replace(/[\s\W-]+/g, "-")
     .replace(/^-+|-+$/g, "");
 
+/**
+ * Optimize the image in memory with sharp, then upload to Cloudinary.
+ * - Auto rotate (EXIF)
+ * - Max width 1600 (no enlarge)
+ * - JPEG 82 quality
+ */
+const uploadBufferToCloudinary = async (file) => {
+  // Defensive: ensure buffer exists
+  if (!file?.buffer || !file?.mimetype) {
+    throw new Error("Invalid image file");
+  }
+
+  // Optimize with sharp
+  const optimized = await sharp(file.buffer)
+    .rotate()
+    .resize({ width: 1600, withoutEnlargement: true })
+    .jpeg({ quality: 82 })
+    .toBuffer();
+
+  // Upload via stream (handles large buffers)
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        resource_type: "image",
+        folder: "categories", // optional folder
+      },
+      (err, result) => {
+        if (err) return reject(err);
+        resolve({ url: result.secure_url, publicId: result.public_id });
+      }
+    );
+    stream.end(optimized);
+  });
+};
+
+/* ----------------- controllers ----------------- */
 export const createCategory = async (req, res) => {
   try {
-    const { name, isActive = true } = req.body || {};
-    if (!name?.trim()) {
+    // Multer (memoryStorage) parses multipart -> fields in req.body, file in req.file
+    const nameRaw = req.body?.name;
+    const isActiveRaw = req.body?.isActive;
+
+    const name = typeof nameRaw === "string" ? nameRaw.trim() : "";
+    if (!name) {
       return res
         .status(400)
         .json({ success: false, message: "Category name is required" });
     }
+
+    const isActive =
+      typeof isActiveRaw === "string"
+        ? isActiveRaw === "true"
+        : Boolean(isActiveRaw);
 
     const slug = slugify(name);
     const exists = await Category.findOne({ $or: [{ name }, { slug }] });
@@ -24,12 +73,30 @@ export const createCategory = async (req, res) => {
         .json({ success: false, message: "Category already exists" });
     }
 
-    const category = await Category.create({
-      name: name.trim(),
-      slug,
-      isActive,
-    });
+    let image = { url: "", publicId: "" };
 
+    // If image present, compress & upload
+    if (req.file && req.file.buffer) {
+      try {
+        image = await uploadBufferToCloudinary(req.file);
+      } catch (err) {
+        // Convert Cloudinary timeout into a clear response
+        if (err?.http_code === 499 || err?.name === "TimeoutError") {
+          return res.status(504).json({
+            success: false,
+            message:
+              "Image upload timed out. Please try a smaller image (max 5MB) or try again.",
+          });
+        }
+        return res.status(502).json({
+          success: false,
+          message:
+            err?.message || "Image upload failed. Please try again later.",
+        });
+      }
+    }
+
+    const category = await Category.create({ name, slug, isActive, image });
     return res.status(201).json({ success: true, category });
   } catch (err) {
     console.error("createCategory:", err);
@@ -61,14 +128,14 @@ export const listCategories = async (req, res) => {
     const limitNum = Math.min(500, Math.max(1, parseInt(limit, 10) || 100));
 
     const sortObj = {};
-    const sortFields = String(sort)
+    String(sort)
       .split(",")
-      .map((s) => s.trim());
-    for (const sf of sortFields) {
-      if (!sf) continue;
-      if (sf.startsWith("-")) sortObj[sf.slice(1)] = -1;
-      else sortObj[sf] = 1;
-    }
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .forEach((sf) => {
+        if (sf.startsWith("-")) sortObj[sf.slice(1)] = -1;
+        else sortObj[sf] = 1;
+      });
 
     const [items, total] = await Promise.all([
       Category.find(q)
@@ -98,14 +165,12 @@ export const listCategories = async (req, res) => {
 export const getCategoryById = async (req, res) => {
   try {
     const { id } = req.params;
-
     const category = await Category.findById(id).lean();
     if (!category) {
       return res
         .status(404)
         .json({ success: false, message: "Category not found" });
     }
-
     return res.status(200).json({ success: true, category });
   } catch (err) {
     console.error("getCategoryById:", err);
@@ -116,35 +181,73 @@ export const getCategoryById = async (req, res) => {
 export const updateCategory = async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, isActive } = req.body || {};
+    const nameRaw = req.body?.name;
+    const isActiveRaw = req.body?.isActive;
 
     const payload = {};
-    if (typeof name === "string" && name.trim()) {
-      payload.name = name.trim();
-      payload.slug = slugify(name);
+
+    if (typeof nameRaw === "string" && nameRaw.trim()) {
+      const name = nameRaw.trim();
+      const slug = slugify(name);
       const dup = await Category.findOne({
         _id: { $ne: id },
-        $or: [{ name: payload.name }, { slug: payload.slug }],
+        $or: [{ name }, { slug }],
       });
       if (dup) {
-        return res.status(400).json({
+        return res
+          .status(400)
+          .json({ success: false, message: "Category already exists" });
+      }
+      payload.name = name;
+      payload.slug = slug;
+    }
+
+    if (typeof isActiveRaw !== "undefined") {
+      payload.isActive =
+        typeof isActiveRaw === "string"
+          ? isActiveRaw === "true"
+          : Boolean(isActiveRaw);
+    }
+
+    const category = await Category.findById(id);
+    if (!category) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Category not found" });
+    }
+
+    // Replace image if a new file is given
+    if (req.file && req.file.buffer) {
+      try {
+        if (category.image?.publicId) {
+          try {
+            await cloudinary.uploader.destroy(category.image.publicId);
+          } catch {
+            /* ignore cloudinary destroy errors */
+          }
+        }
+        const newImage = await uploadBufferToCloudinary(req.file);
+        payload.image = newImage;
+      } catch (err) {
+        if (err?.http_code === 499 || err?.name === "TimeoutError") {
+          return res.status(504).json({
+            success: false,
+            message:
+              "Image upload timed out. Please try a smaller image (max 5MB) or try again.",
+          });
+        }
+        return res.status(502).json({
           success: false,
-          message: "Another category with the same name already exists",
+          message:
+            err?.message || "Image upload failed. Please try again later.",
         });
       }
     }
-    if (typeof isActive === "boolean") payload.isActive = isActive;
 
     const updated = await Category.findByIdAndUpdate(id, payload, {
       new: true,
       runValidators: true,
     });
-
-    if (!updated) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Category not found" });
-    }
 
     return res.status(200).json({ success: true, category: updated });
   } catch (err) {
@@ -157,13 +260,22 @@ export const deleteCategory = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const deleted = await Category.findByIdAndDelete(id);
-    if (!deleted) {
+    const category = await Category.findById(id);
+    if (!category) {
       return res
         .status(404)
         .json({ success: false, message: "Category not found" });
     }
 
+    if (category.image?.publicId) {
+      try {
+        await cloudinary.uploader.destroy(category.image.publicId);
+      } catch {
+        /* ignore destroy error */
+      }
+    }
+
+    await Category.findByIdAndDelete(id);
     return res.status(200).json({ success: true, message: "Category deleted" });
   } catch (err) {
     console.error("deleteCategory:", err);
