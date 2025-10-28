@@ -1,4 +1,3 @@
-// controllers/orderController.js
 import axios from "axios";
 import SSLCommerzPayment from "sslcommerz-lts";
 import orderModel from "../models/orderModel.js";
@@ -111,7 +110,9 @@ function isXXL(size) {
 
 function computeDeliveryFee(address) {
   if (!address) return { fee: 150, label: "Other" };
-  const d = String(address.district || "").toLowerCase().trim();
+  const d = String(address.district || "")
+    .toLowerCase()
+    .trim();
   const line = String(address.addressLine1 || "").toLowerCase();
 
   if (d === "dhaka") return { fee: 80, label: "Dhaka" };
@@ -190,10 +191,127 @@ async function computeTotalsFromDB(items, address) {
     });
   }
 
-  const { fee: deliveryFee, label: deliveryLabel } = computeDeliveryFee(address);
+  const { fee: deliveryFee, label: deliveryLabel } =
+    computeDeliveryFee(address);
   const computedAmount = subtotal + deliveryFee;
 
   return { computedAmount, deliveryFee, deliveryLabel, lines };
+}
+
+/** Map an order status to a progress % and step name for UI. */
+function getOrderProgress(status) {
+  const s = String(status || "").toLowerCase();
+  const steps = [
+    { key: "order placed", pct: 15 },
+    { key: "paid", pct: 30 },
+    { key: "processing", pct: 45 },
+    { key: "shipped", pct: 70 },
+    { key: "out for delivery", pct: 85 },
+    { key: "delivered", pct: 100 },
+    { key: "payment cancelled", pct: 0 },
+    { key: "payment failed", pct: 0 },
+    { key: "cancelled", pct: 0 },
+  ];
+
+  for (const st of steps) {
+    if (s.includes(st.key)) {
+      return { progressPct: st.pct, step: st.key };
+    }
+  }
+  // default
+  return { progressPct: 15, step: "order placed" };
+}
+
+/** Provide a simple ETA window based on area & status (best-effort). */
+function estimateDeliveryWindow(address, status) {
+  const { label } = computeDeliveryFee(address || {});
+  const base =
+    label === "Dhaka"
+      ? [1, 3]
+      : label === "Gazipur" || label === "Savar/Ashulia"
+      ? [2, 4]
+      : [3, 7];
+
+  // if already shipped/out for delivery, compress window a bit
+  const s = String(status || "").toLowerCase();
+  const tweak = s.includes("out for delivery")
+    ? [0, 1]
+    : s.includes("shipped")
+    ? [1, 2]
+    : [0, 0];
+
+  const minDays = Math.max(1, base[0] - tweak[0]);
+  const maxDays = Math.max(minDays, base[1] - tweak[1]);
+
+  const now = new Date();
+  const etaFrom = new Date(now);
+  etaFrom.setDate(now.getDate() + minDays);
+  const etaTo = new Date(now);
+  etaTo.setDate(now.getDate() + maxDays);
+
+  return {
+    areaLabel: label,
+    etaFromISO: etaFrom.toISOString(),
+    etaToISO: etaTo.toISOString(),
+    minDays,
+    maxDays,
+  };
+}
+
+/** Remove any sensitive/internal fields before returning to the user. */
+function sanitizeOrderForUser(order) {
+  if (!order) return null;
+  const o = order.toObject ? order.toObject() : order;
+  const {
+    _id,
+    status,
+    amount,
+    payment,
+    paymentMethod,
+    date,
+    items = [],
+    address = {},
+    userId,
+    // keep minimal fields; exclude e.g. internal notes if you later add them
+  } = o;
+
+  const safeItems = (Array.isArray(items) ? items : []).map((it) => ({
+    productId: String(it.productId || ""),
+    name: it.name,
+    size: it.size,
+    quantity: it.quantity,
+    unitBase: it.unitBase,
+    unitDiscount: it.unitDiscount,
+    unitFinal: it.unitFinal,
+    lineSubtotal: it.lineSubtotal,
+    xxlSurchargeApplied: it.xxlSurchargeApplied,
+    image: it.image || [], // may be filled in userOrders enrich step; OK if missing
+  }));
+
+  const safeAddress = {
+    recipientName: address.recipientName,
+    phone: address.phone, // required for public lookup match; OK to return
+    addressLine1: address.addressLine1,
+    district: address.district,
+    postalCode: address.postalCode,
+  };
+
+  const progress = getOrderProgress(status);
+  const eta = estimateDeliveryWindow(address, status);
+
+  return {
+    orderId: String(_id),
+    userId: String(userId || ""),
+    status,
+    progress,
+    eta,
+    amount,
+    payment,
+    paymentMethod,
+    date,
+    items: safeItems,
+    address: safeAddress,
+  };
 }
 
 /* ----------------------- COD ----------------------- */
@@ -677,22 +795,141 @@ const courierCheck = async (req, res) => {
   }
 };
 
+/* ----------------------- Tracking: NEW ----------------------- */
+/**
+ * Authenticated: GET /api/order/track/:orderId
+ * Returns sanitized order only if it belongs to the current user.
+ */
+const trackOrderMine = async (req, res) => {
+  try {
+    const userId = req.userId || req.body.userId;
+    const { orderId } = req.params;
+
+    if (!userId) {
+      return res
+        .status(401)
+        .json({ success: false, message: "Unauthorized: userId missing" });
+    }
+    if (!orderId) {
+      return res
+        .status(400)
+        .json({ success: false, message: "orderId is required" });
+    }
+
+    const order = await orderModel.findOne({ _id: orderId, userId });
+    if (!order) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
+    }
+
+    const safe = sanitizeOrderForUser(order);
+    return res.json({ success: true, order: safe });
+  } catch (error) {
+    console.error("trackOrderMine:", error.message);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * Public lookup: POST /api/order/track/lookup
+ * Body: { orderId, phone }
+ * Matches by _id and address.phone (Bangladesh number, with/without +88).
+ * Returns sanitized order if match succeeds.
+ */
+const trackOrderLookup = async (req, res) => {
+  try {
+    const { orderId, phone } = req.body || {};
+    if (!orderId || !phone) {
+      return res.status(400).json({
+        success: false,
+        message: "orderId and phone are required",
+      });
+    }
+
+    // Normalize phone for comparison: allow +88 and plain 01XXXXXXXXX
+    const normPhone = String(phone).replace(/^\+?88/, "");
+
+    const order = await orderModel.findOne({ _id: orderId }).lean();
+    if (!order) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
+    }
+
+    const orderPhone = String(order?.address?.phone || "").replace(
+      /^\+?88/,
+      ""
+    );
+    if (!orderPhone || orderPhone !== normPhone) {
+      return res
+        .status(403)
+        .json({ success: false, message: "Phone does not match this order" });
+    }
+
+    const safe = sanitizeOrderForUser(order);
+    return res.json({ success: true, order: safe });
+  } catch (error) {
+    console.error("trackOrderLookup:", error.message);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * Alias: GET /api/order/my/:orderId (same behavior as /track/:orderId)
+ */
+const getMyOrderById = async (req, res) => {
+  try {
+    const userId = req.userId || req.body.userId;
+    const { orderId } = req.params;
+
+    if (!userId) {
+      return res
+        .status(401)
+        .json({ success: false, message: "Unauthorized: userId missing" });
+    }
+    if (!orderId) {
+      return res
+        .status(400)
+        .json({ success: false, message: "orderId is required" });
+    }
+
+    const order = await orderModel.findOne({ _id: orderId, userId });
+    if (!order) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
+    }
+
+    const safe = sanitizeOrderForUser(order);
+    return res.json({ success: true, order: safe });
+  } catch (error) {
+    console.error("getMyOrderById:", error.message);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/* ----------------------- Exports ----------------------- */
 export {
   // lists/updates
   allOrders,
+  bkashCallback,
   // bKash Hosted (Normal) Checkout
   bkashCreatePayment,
-  bkashCallback,
   // courier
   courierCheck,
+  getMyOrderById,
   // SSL
   initiateSslPayment,
+  // core
+  placeOrder,
   sslCancel,
   sslFail,
   sslIpn,
   sslSuccess,
-  // core
-  placeOrder,
+  trackOrderLookup,
+  // tracking
+  trackOrderMine,
   // admin helpers
   updateOrderAddress,
   updateStatus,
