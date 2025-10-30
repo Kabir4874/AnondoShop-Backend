@@ -1,16 +1,13 @@
-// controllers/contentController.js
 import { v2 as cloudinary } from "cloudinary";
 import sharp from "sharp";
 import { Banner, Headline } from "../models/contentModels.js";
 
-// Cloudinary configuration (make sure to set these environment variables)
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-/* ----------------- Utility Functions ----------------- */
 function parseBool(v, def = false) {
   if (v === undefined || v === null) return def;
   if (typeof v === "boolean") return v;
@@ -25,9 +22,6 @@ function parsePagination({ page = 1, limit = 20, max = 100 }) {
   return { page: p, limit: l, skip };
 }
 
-/**
- * Optimize and upload image buffer to Cloudinary
- */
 const uploadImageToCloudinary = async (
   fileBuffer,
   mimetype,
@@ -38,9 +32,8 @@ const uploadImageToCloudinary = async (
       throw new Error("Invalid file data");
     }
 
-    // Optimize image with sharp
     const optimizedBuffer = await sharp(fileBuffer)
-      .rotate() // Auto-rotate based on EXIF
+      .rotate()
       .resize({
         width: 1200,
         height: 600,
@@ -50,7 +43,6 @@ const uploadImageToCloudinary = async (
       .jpeg({ quality: 85, progressive: true })
       .toBuffer();
 
-    // Upload to Cloudinary
     return new Promise((resolve, reject) => {
       const uploadStream = cloudinary.uploader.upload_stream(
         {
@@ -80,9 +72,6 @@ const uploadImageToCloudinary = async (
   }
 };
 
-/**
- * Delete image from Cloudinary
- */
 const deleteImageFromCloudinary = async (publicId) => {
   if (!publicId) return;
 
@@ -91,11 +80,9 @@ const deleteImageFromCloudinary = async (publicId) => {
     console.log(`Deleted image from Cloudinary: ${publicId}`);
   } catch (error) {
     console.error("Error deleting image from Cloudinary:", error);
-    // Don't throw error for deletion failures to avoid blocking the operation
   }
 };
 
-/* ----------------- Headline Controllers ----------------- */
 export const listHeadlines = async (req, res) => {
   try {
     const { page, limit, skip } = parsePagination(req.query);
@@ -175,7 +162,6 @@ export const deleteHeadline = async (req, res) => {
   }
 };
 
-/* ----------------- Banner Controllers ----------------- */
 export const listBanners = async (req, res) => {
   try {
     const { page, limit, skip } = parsePagination(req.query);
@@ -200,14 +186,12 @@ export const listBanners = async (req, res) => {
 
 export const createBanner = async (req, res) => {
   try {
-    // Check if file exists (from memory storage)
     if (!req.file) {
       return res
         .status(400)
         .json({ success: false, message: "Image file is required" });
     }
 
-    // Upload to Cloudinary
     const imageData = await uploadImageToCloudinary(
       req.file.buffer,
       req.file.mimetype,
@@ -216,7 +200,6 @@ export const createBanner = async (req, res) => {
 
     const isActive = parseBool(req.body?.isActive, true);
 
-    // Create banner in database
     const banner = await Banner.create({
       image: {
         url: imageData.url,
@@ -232,7 +215,6 @@ export const createBanner = async (req, res) => {
   } catch (err) {
     console.error("createBanner:", err);
 
-    // Handle specific Cloudinary errors
     if (err.http_code === 499 || err.name === "TimeoutError") {
       return res.status(504).json({
         success: false,
@@ -259,7 +241,6 @@ export const updateBanner = async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Find existing banner
     const banner = await Banner.findById(id);
     if (!banner) {
       return res
@@ -269,15 +250,12 @@ export const updateBanner = async (req, res) => {
 
     const updateData = {};
 
-    // Handle image update if new file provided
     if (req.file && req.file.buffer) {
       try {
-        // Delete old image from Cloudinary
         if (banner.image?.publicId) {
           await deleteImageFromCloudinary(banner.image.publicId);
         }
 
-        // Upload new image to Cloudinary
         const newImageData = await uploadImageToCloudinary(
           req.file.buffer,
           req.file.mimetype,
@@ -309,12 +287,10 @@ export const updateBanner = async (req, res) => {
       }
     }
 
-    // Handle isActive update
     if ("isActive" in req.body) {
       updateData.isActive = parseBool(req.body.isActive);
     }
 
-    // Update banner
     const updatedBanner = await Banner.findByIdAndUpdate(id, updateData, {
       new: true,
       runValidators: true,
@@ -337,7 +313,6 @@ export const deleteBanner = async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Find banner first to get image data
     const banner = await Banner.findById(id);
     if (!banner) {
       return res
@@ -345,12 +320,10 @@ export const deleteBanner = async (req, res) => {
         .json({ success: false, message: "Banner not found" });
     }
 
-    // Delete image from Cloudinary
     if (banner.image?.publicId) {
       await deleteImageFromCloudinary(banner.image.publicId);
     }
 
-    // Delete from database
     await Banner.findByIdAndDelete(id);
 
     res.json({

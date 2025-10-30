@@ -4,14 +4,12 @@ import orderModel from "../models/orderModel.js";
 import productModel from "../models/productModel.js";
 import userModel from "../models/userModel.js";
 
-/* ----------------------- ENV / Config ----------------------- */
 const store_id = process.env.SSLCZ_STORE_ID;
 const store_passwd = process.env.SSLCZ_STORE_PASSWORD;
 const is_live = (process.env.SSLCZ_IS_LIVE || "false") === "true";
 const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173";
 const COURIER_API = process.env.COURIER_API;
 
-// bKash Hosted (Normal) Checkout
 const BKASH_CHECKOUT_GRANT_URL = process.env.BKASH_CHECKOUT_GRANT_URL;
 const BKASH_CHECKOUT_CREATE_URL = process.env.BKASH_CHECKOUT_CREATE_URL;
 const BKASH_CHECKOUT_EXECUTE_URL = process.env.BKASH_CHECKOUT_EXECUTE_URL;
@@ -22,9 +20,8 @@ const BKASH_PASSWORD = process.env.BKASH_PASSWORD;
 const BKASH_APP_KEY = process.env.BKASH_APP_KEY;
 const BKASH_APP_SECRET = process.env.BKASH_APP_SECRET;
 
-/* ----------------------- bKash Hosted Token Cache ----------------------- */
 let bkashHostedIdToken = null;
-let bkashHostedTokenExpiry = 0; // epoch ms
+let bkashHostedTokenExpiry = 0;
 
 async function bkashGrantTokenHosted() {
   const now = Date.now();
@@ -61,7 +58,7 @@ async function bkashGrantTokenHosted() {
     }
 
     bkashHostedIdToken = data.id_token;
-    const expiresIn = Number(data.expires_in || 3600); // seconds
+    const expiresIn = Number(data.expires_in || 3600);
     bkashHostedTokenExpiry = Date.now() + expiresIn * 1000;
 
     return bkashHostedIdToken;
@@ -75,7 +72,7 @@ async function bkashHostedHeaders() {
   const idToken = await bkashGrantTokenHosted();
   return {
     "Content-Type": "application/json",
-    authorization: idToken, // raw token per Hosted docs (not Bearer)
+    authorization: idToken,
     "x-app-key": BKASH_APP_KEY,
   };
 }
@@ -89,15 +86,12 @@ function generateTransactionId() {
 
 function validateBdAddress(addr) {
   if (!addr) return "Address is required";
-  const { recipientName, phone, addressLine1, district, postalCode } = addr;
-  if (!recipientName || !phone || !addressLine1 || !district || !postalCode) {
-    return "recipientName, phone, addressLine1, district, postalCode are required";
+  const { recipientName, phone, addressLine1, district } = addr;
+  if (!recipientName || !phone || !addressLine1 || !district) {
+    return "recipientName, phone, addressLine1, district are required";
   }
   if (!/^(?:\+?88)?01[3-9]\d{8}$/.test(String(phone))) {
     return "Invalid Bangladesh phone number";
-  }
-  if (!/^\d{4}$/.test(String(postalCode))) {
-    return "Postal code must be 4 digits";
   }
   return null;
 }
@@ -232,7 +226,6 @@ function estimateDeliveryWindow(address, status) {
       ? [2, 4]
       : [3, 7];
 
-  // if already shipped/out for delivery, compress window a bit
   const s = String(status || "").toLowerCase();
   const tweak = s.includes("out for delivery")
     ? [0, 1]
@@ -272,7 +265,6 @@ function sanitizeOrderForUser(order) {
     items = [],
     address = {},
     userId,
-    // keep minimal fields; exclude e.g. internal notes if you later add them
   } = o;
 
   const safeItems = (Array.isArray(items) ? items : []).map((it) => ({
@@ -285,15 +277,14 @@ function sanitizeOrderForUser(order) {
     unitFinal: it.unitFinal,
     lineSubtotal: it.lineSubtotal,
     xxlSurchargeApplied: it.xxlSurchargeApplied,
-    image: it.image || [], // may be filled in userOrders enrich step; OK if missing
+    image: it.image || [],
   }));
 
   const safeAddress = {
     recipientName: address.recipientName,
-    phone: address.phone, // required for public lookup match; OK to return
+    phone: address.phone,
     addressLine1: address.addressLine1,
     district: address.district,
-    postalCode: address.postalCode,
   };
 
   const progress = getOrderProgress(status);
@@ -407,7 +398,7 @@ const initiateSslPayment = async (req, res) => {
       cus_add2: "N/A",
       cus_city: address.district || "Dhaka",
       cus_state: address.district || "Dhaka",
-      cus_postcode: address.postalCode || "1000",
+      cus_postcode: "1000",
       cus_country: "Bangladesh",
       cus_phone: address.phone || "01700000000",
       cus_fax: "N/A",
@@ -417,7 +408,7 @@ const initiateSslPayment = async (req, res) => {
       ship_add2: "N/A",
       ship_city: address.district || "Dhaka",
       ship_state: address.district || "Dhaka",
-      ship_postcode: address.postalCode || "1000",
+      ship_postcode: "1000",
       ship_country: "Bangladesh",
 
       value_a: newOrder._id.toString(),
@@ -500,9 +491,9 @@ const sslCancel = async (req, res) => {
   }
 };
 
-const sslIpn = async (req, res) => {
+const sslIpn = async (_req, res) => {
   try {
-    console.log("SSL IPN:", req.body);
+    // Optional: verify IPN signature if needed
     res.status(200).send("OK");
   } catch (error) {
     console.log(error);
@@ -737,7 +728,6 @@ const updateOrderAddress = async (req, res) => {
       phone: address.phone,
       addressLine1: address.addressLine1,
       district: address.district,
-      postalCode: address.postalCode,
     };
 
     await order.save();
@@ -847,7 +837,6 @@ const trackOrderLookup = async (req, res) => {
       });
     }
 
-    // Normalize phone for comparison: allow +88 and plain 01XXXXXXXXX
     const normPhone = String(phone).replace(/^\+?88/, "");
 
     const order = await orderModel.findOne({ _id: orderId }).lean();
