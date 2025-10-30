@@ -4,7 +4,6 @@ import express from "express";
 import connectCloudinary from "./config/cloudinary.js";
 import connectDB from "./config/mongodb.js";
 import analyticsRoutes from "./routes/analyticsRoute.js";
-import cartRouter from "./routes/cartRoute.js";
 import categoryRouter from "./routes/categoryRoute.js";
 import contentRouter from "./routes/contentRoutes.js";
 import marketingConfigRoutes from "./routes/marketingConfigRoute.js";
@@ -22,7 +21,6 @@ app.use(cors());
 
 app.use("/api/user", userRouter);
 app.use("/api/product", productRouter);
-app.use("/api/cart", cartRouter);
 app.use("/api/order", orderRouter);
 app.use("/api/category", categoryRouter);
 app.use("/api/content", contentRouter);

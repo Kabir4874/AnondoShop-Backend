@@ -1,9 +1,12 @@
+// controllers/orderController.js
 import axios from "axios";
+import jwt from "jsonwebtoken";
 import SSLCommerzPayment from "sslcommerz-lts";
 import orderModel from "../models/orderModel.js";
 import productModel from "../models/productModel.js";
 import userModel from "../models/userModel.js";
 
+// ---------- Config ----------
 const store_id = process.env.SSLCZ_STORE_ID;
 const store_passwd = process.env.SSLCZ_STORE_PASSWORD;
 const is_live = (process.env.SSLCZ_IS_LIVE || "false") === "true";
@@ -20,6 +23,23 @@ const BKASH_PASSWORD = process.env.BKASH_PASSWORD;
 const BKASH_APP_KEY = process.env.BKASH_APP_KEY;
 const BKASH_APP_SECRET = process.env.BKASH_APP_SECRET;
 
+// ---------- Phone helpers ----------
+const BD_PHONE_REGEX = /^(?:\+?88)?01[3-9]\d{8}$/;
+function normalizeBDPhone(v) {
+  if (!v) return v;
+  const raw = String(v).replace(/[^\d+]/g, "");
+  if (/^\+8801[3-9]\d{8}$/.test(raw)) return raw;
+  const digits = raw.replace(/^\+?/, "");
+  if (/^01[3-9]\d{8}$/.test(digits)) return `+88${digits}`;
+  if (/^8801[3-9]\d{8}$/.test(digits)) return `+${digits}`;
+  return raw;
+}
+
+// ---------- Token (optional to return) ----------
+const createToken = (id) =>
+  jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: "30d" });
+
+// ---------- bKash token cache ----------
 let bkashHostedIdToken = null;
 let bkashHostedTokenExpiry = 0;
 
@@ -77,7 +97,7 @@ async function bkashHostedHeaders() {
   };
 }
 
-/* ----------------------- Helpers ----------------------- */
+// ----------------------- Helpers -----------------------
 function generateTransactionId() {
   const ts = Date.now().toString();
   const rnd = Math.random().toString(36).substring(2, 8);
@@ -90,7 +110,7 @@ function validateBdAddress(addr) {
   if (!recipientName || !phone || !addressLine1 || !district) {
     return "recipientName, phone, addressLine1, district are required";
   }
-  if (!/^(?:\+?88)?01[3-9]\d{8}$/.test(String(phone))) {
+  if (!BD_PHONE_REGEX.test(String(phone))) {
     return "Invalid Bangladesh phone number";
   }
   return null;
@@ -212,7 +232,6 @@ function getOrderProgress(status) {
       return { progressPct: st.pct, step: st.key };
     }
   }
-  // default
   return { progressPct: 15, step: "order placed" };
 }
 
@@ -305,21 +324,65 @@ function sanitizeOrderForUser(order) {
   };
 }
 
-/* ----------------------- COD ----------------------- */
+// ---------- Ensure/create account by phone (for checkout) ----------
+function applyProfileFields(user, { name, address }) {
+  if (name) user.name = name;
+  if (address && typeof address === "object") {
+    const { recipientName, phone, addressLine1, district } = address;
+    if (recipientName && phone && addressLine1 && district) {
+      user.address = {
+        recipientName,
+        phone,
+        addressLine1,
+        district,
+      };
+    }
+  }
+}
+
+async function ensureAccountByPhone(phone, name, address) {
+  const normalized = normalizeBDPhone(phone);
+  if (!BD_PHONE_REGEX.test(normalized)) {
+    const err = new Error("Invalid Bangladesh phone number");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  let user = await userModel.findOne({ phone: normalized }).select("+password");
+  if (!user) {
+    user = new userModel({ phone: normalized, createdVia: "checkout" });
+  }
+  applyProfileFields(user, { name, address });
+  await user.save();
+
+  const token = createToken(user._id);
+  const passwordSet = Boolean(user.password);
+  return { user, token, passwordSet };
+}
+
+// ----------------------- COD -----------------------
 const placeOrder = async (req, res) => {
   try {
-    const userId = req.userId || req.body.userId;
-    const { items, address } = req.body;
+    // Accept unauthenticated checkout with phone
+    const { phone, name, items, address } = req.body || {};
 
-    if (!userId) {
+    if (!phone) {
       return res
-        .status(401)
-        .json({ success: false, message: "Unauthorized: userId missing" });
+        .status(400)
+        .json({ success: false, message: "phone is required" });
     }
     const addrError = validateBdAddress(address);
     if (addrError) {
       return res.status(400).json({ success: false, message: addrError });
     }
+
+    // Ensure account by phone
+    const { user, token, passwordSet } = await ensureAccountByPhone(
+      phone,
+      name,
+      address
+    );
+    const userId = user._id;
 
     const { computedAmount, lines } = await computeTotalsFromDB(items, address);
 
@@ -334,35 +397,43 @@ const placeOrder = async (req, res) => {
       status: "Order Placed",
     });
 
-    await userModel.findByIdAndUpdate(userId, { cartData: {} });
-
-    res.json({ success: true, message: "Order Placed", orderId: newOrder._id });
+    return res.json({
+      success: true,
+      message: "Order Placed",
+      orderId: newOrder._id,
+      token, // allow frontend to persist session
+      passwordSet,
+    });
   } catch (error) {
     console.log(error);
-    res.json({ success: false, message: error.message });
+    const code = error.statusCode || 500;
+    res.status(code).json({ success: false, message: error.message });
   }
 };
 
-/* ----------------------- SSLCommerz ----------------------- */
+// ----------------------- SSLCommerz -----------------------
 const initiateSslPayment = async (req, res) => {
   try {
-    const userId = req.userId || req.body.userId;
-    const { items, address } = req.body;
-
-    if (!userId) {
+    const { phone, name, items, address } = req.body || {};
+    if (!phone) {
       return res
-        .status(401)
-        .json({ success: false, message: "Unauthorized: userId missing" });
+        .status(400)
+        .json({ success: false, message: "phone is required" });
     }
     const addrError = validateBdAddress(address);
     if (addrError) {
       return res.status(400).json({ success: false, message: addrError });
     }
 
-    const { computedAmount, lines } = await computeTotalsFromDB(items, address);
+    // Ensure account by phone
+    const { user, token, passwordSet } = await ensureAccountByPhone(
+      phone,
+      name,
+      address
+    );
+    const userId = user._id;
 
-    const user = await userModel.findById(userId).select("email").lean();
-    const userEmail = user?.email || "customer@example.com";
+    const { computedAmount, lines } = await computeTotalsFromDB(items, address);
 
     const newOrder = await orderModel.create({
       userId,
@@ -392,8 +463,9 @@ const initiateSslPayment = async (req, res) => {
       product_category: "Ecommerce",
       product_profile: "general",
 
+      // Customer info
       cus_name: address.recipientName || "Customer",
-      cus_email: userEmail,
+      cus_email: "customer@example.com",
       cus_add1: address.addressLine1 || "Address Line 1",
       cus_add2: "N/A",
       cus_city: address.district || "Dhaka",
@@ -403,6 +475,7 @@ const initiateSslPayment = async (req, res) => {
       cus_phone: address.phone || "01700000000",
       cus_fax: "N/A",
 
+      // Shipping info
       ship_name: address.recipientName || "Shipping",
       ship_add1: address.addressLine1 || "Address Line 1",
       ship_add2: "N/A",
@@ -411,8 +484,9 @@ const initiateSslPayment = async (req, res) => {
       ship_postcode: "1000",
       ship_country: "Bangladesh",
 
+      // Pass-through values
       value_a: newOrder._id.toString(),
-      value_b: userId,
+      value_b: userId.toString(),
     };
 
     const sslcz = new SSLCommerzPayment(store_id, store_passwd, is_live);
@@ -430,6 +504,8 @@ const initiateSslPayment = async (req, res) => {
       success: true,
       url: GatewayPageURL,
       orderId: newOrder._id,
+      token,
+      passwordSet,
     });
   } catch (error) {
     console.log(error);
@@ -439,16 +515,13 @@ const initiateSslPayment = async (req, res) => {
 
 const sslSuccess = async (req, res) => {
   try {
-    const { value_a: orderId, value_b: userId } = req.body || {};
+    const { value_a: orderId } = req.body || {};
     if (orderId) {
       await orderModel.findByIdAndUpdate(orderId, {
         payment: true,
         paymentMethod: "SSLCommerz",
         status: "Paid",
       });
-    }
-    if (userId) {
-      await userModel.findByIdAndUpdate(userId, { cartData: {} });
     }
     return res.redirect(
       `${CLIENT_URL}/payment-result?status=success&orderId=${orderId || ""}`
@@ -501,22 +574,28 @@ const sslIpn = async (_req, res) => {
   }
 };
 
-/* ----------------------- bKash Hosted (Normal) Checkout ----------------------- */
+// ----------------------- bKash Hosted (Normal) Checkout -----------------------
 const bkashCreatePayment = async (req, res) => {
   try {
-    const userId = req.userId || req.body.userId;
-    const { items, address } = req.body;
+    const { phone, name, items, address } = req.body || {};
 
-    if (!userId) {
+    if (!phone) {
       return res
-        .status(401)
-        .json({ success: false, message: "Unauthorized: userId missing" });
+        .status(400)
+        .json({ success: false, message: "phone is required" });
     }
-
     const addrError = validateBdAddress(address);
     if (addrError) {
       return res.status(400).json({ success: false, message: addrError });
     }
+
+    // Ensure account by phone
+    const { user, token, passwordSet } = await ensureAccountByPhone(
+      phone,
+      name,
+      address
+    );
+    const userId = user._id;
 
     const { computedAmount, lines } = await computeTotalsFromDB(items, address);
 
@@ -549,7 +628,9 @@ const bkashCreatePayment = async (req, res) => {
       timeout: 20000,
     });
 
-    return res.status(201).json({ success: true, orderId: order._id, data });
+    return res
+      .status(201)
+      .json({ success: true, orderId: order._id, token, passwordSet, data });
   } catch (error) {
     console.error(
       "bkashCreatePayment (Hosted):",
@@ -593,14 +674,11 @@ const bkashCallback = async (req, res) => {
 
     if (exec?.statusCode === "0000") {
       if (orderId) {
-        const order = await orderModel.findByIdAndUpdate(
-          orderId,
-          { payment: true, paymentMethod: "bKash", status: "Paid" },
-          { new: true }
-        );
-        if (order?.userId) {
-          await userModel.findByIdAndUpdate(order.userId, { cartData: {} });
-        }
+        await orderModel.findByIdAndUpdate(orderId, {
+          payment: true,
+          paymentMethod: "bKash",
+          status: "Paid",
+        });
       }
       return res.redirect(
         `${CLIENT_URL}/payment-result?status=success${
@@ -623,7 +701,7 @@ const bkashCallback = async (req, res) => {
   }
 };
 
-/* ----------------------- Lists & Updates ----------------------- */
+// ----------------------- Lists & Updates -----------------------
 const allOrders = async (_req, res) => {
   try {
     const orders = await orderModel.find({}).sort({ date: -1 });
@@ -636,6 +714,7 @@ const allOrders = async (_req, res) => {
 
 const userOrders = async (req, res) => {
   try {
+    // still authenticated endpoint
     const userId = req.userId || req.body.userId;
     if (!userId) {
       return res
@@ -745,7 +824,7 @@ const updateOrderAddress = async (req, res) => {
   }
 };
 
-/* ----------------------- Courier: Delivery Rate Check ----------------------- */
+// ----------------------- Courier: Delivery Rate Check -----------------------
 const courierCheck = async (req, res) => {
   try {
     const { phone } = req.body || {};
@@ -785,11 +864,7 @@ const courierCheck = async (req, res) => {
   }
 };
 
-/* ----------------------- Tracking: NEW ----------------------- */
-/**
- * Authenticated: GET /api/order/track/:orderId
- * Returns sanitized order only if it belongs to the current user.
- */
+// ----------------------- Tracking -----------------------
 const trackOrderMine = async (req, res) => {
   try {
     const userId = req.userId || req.body.userId;
@@ -821,12 +896,6 @@ const trackOrderMine = async (req, res) => {
   }
 };
 
-/**
- * Public lookup: POST /api/order/track/lookup
- * Body: { orderId, phone }
- * Matches by _id and address.phone (Bangladesh number, with/without +88).
- * Returns sanitized order if match succeeds.
- */
 const trackOrderLookup = async (req, res) => {
   try {
     const { orderId, phone } = req.body || {};
@@ -864,9 +933,6 @@ const trackOrderLookup = async (req, res) => {
   }
 };
 
-/**
- * Alias: GET /api/order/my/:orderId (same behavior as /track/:orderId)
- */
 const getMyOrderById = async (req, res) => {
   try {
     const userId = req.userId || req.body.userId;
@@ -898,7 +964,7 @@ const getMyOrderById = async (req, res) => {
   }
 };
 
-/* ----------------------- Exports ----------------------- */
+// ----------------------- Exports -----------------------
 export {
   // lists/updates
   allOrders,

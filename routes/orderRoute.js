@@ -1,3 +1,4 @@
+// routes/orderRouter.js
 import express from "express";
 import {
   allOrders,
@@ -22,38 +23,37 @@ import authUser from "../middleware/auth.js";
 
 const orderRouter = express.Router();
 
-/* Admin */
+/* ---------------- Admin ---------------- */
 orderRouter.post("/list", adminAuth, allOrders);
 orderRouter.post("/status", adminAuth, updateStatus);
 orderRouter.post("/courier/check", adminAuth, courierCheck);
 orderRouter.post("/update-address", adminAuth, updateOrderAddress);
 
-/* Customer: COD */
-orderRouter.post("/place", authUser, placeOrder);
+/* ---------------- Customer: Place Order (COD) ----------------
+   Unauthenticated: creates/ensures account by phone during checkout */
+orderRouter.post("/place", placeOrder);
 
-/* Customer: My orders */
+/* ---------------- Customer: My orders (requires token) ---------------- */
 orderRouter.post("/userorders", authUser, userOrders);
 
-/* Customer: Track (authenticated) */
-orderRouter.get("/track/:orderId", authUser, trackOrderMine);
+/* ---------------- Customer: Tracking ---------------- */
+orderRouter.get("/track/:orderId", authUser, trackOrderMine); // authenticated
+orderRouter.post("/track/lookup", trackOrderLookup); // public by phone + orderId
+orderRouter.get("/my/:orderId", authUser, getMyOrderById); // alias of track/:orderId
 
-/* Customer: Track (public lookup with orderId + phone) */
-orderRouter.post("/track/lookup", trackOrderLookup);
+/* ---------------- SSLCommerz ---------------- */
+// Initiate payment (unauthenticated; ensures account by phone)
+orderRouter.post("/ssl/initiate", initiateSslPayment);
 
-/* Optional: fetch one of my orders by id (same as /track/:orderId, different path) */
-orderRouter.get("/my/:orderId", authUser, getMyOrderById);
-
-/* SSLCommerz */
-// Initiate payment (protected)
-orderRouter.post("/ssl/initiate", authUser, initiateSslPayment);
-
+// Payment callbacks (SSLCommerz)
 orderRouter.post("/ssl/success", sslSuccess);
 orderRouter.post("/ssl/fail", sslFail);
 orderRouter.post("/ssl/cancel", sslCancel);
 orderRouter.post("/ssl/ipn", sslIpn);
 
-/* bKash Hosted (Normal) Checkout */
-orderRouter.post("/bkash/create", authUser, bkashCreatePayment);
+/* ---------------- bKash Hosted (Normal) Checkout ---------------- */
+// Create payment (unauthenticated; ensures account by phone)
+orderRouter.post("/bkash/create", bkashCreatePayment);
 orderRouter.get("/bkash/callback", bkashCallback);
 
 export default orderRouter;
