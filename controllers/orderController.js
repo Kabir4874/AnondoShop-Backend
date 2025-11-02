@@ -110,7 +110,8 @@ function validateBdAddress(addr) {
   if (!recipientName || !phone || !addressLine1 || !district) {
     return "recipientName, phone, addressLine1, district are required";
   }
-  if (!BD_PHONE_REGEX.test(String(phone))) {
+  const normalized = normalizeBDPhone(phone);
+  if (!BD_PHONE_REGEX.test(String(normalized))) {
     return "Invalid Bangladesh phone number";
   }
   return null;
@@ -122,7 +123,7 @@ function isXXL(size) {
   return s.startsWith("XXL");
 }
 
-function computeDeliveryFee(address) {
+function computeDeliveryFeeFromAddress(address) {
   if (!address) return { fee: 150, label: "Other" };
   const d = String(address.district || "")
     .toLowerCase()
@@ -143,6 +144,32 @@ function computeDeliveryFee(address) {
   return { fee: 150, label: "Other" };
 }
 
+/**
+ * NEW: compute fee from explicit override (deliveryArea widget) if provided/valid,
+ * else fall back to address-derived fee.
+ */
+function resolveDeliveryFee(address, deliveryOverride) {
+  const area = String(deliveryOverride?.area || "").toLowerCase();
+  const feeNum = Number(deliveryOverride?.fee);
+  const label = deliveryOverride?.label;
+
+  if (
+    (area === "inside" || area === "outside") &&
+    Number.isFinite(feeNum) &&
+    feeNum >= 0
+  ) {
+    return {
+      fee: feeNum,
+      label:
+        label ||
+        (area === "inside" ? "Inside Dhaka City" : "Outside Dhaka City"),
+      via: "override",
+    };
+  }
+  const fb = computeDeliveryFeeFromAddress(address);
+  return { ...fb, via: "address" };
+}
+
 function normalizeItems(items) {
   if (!Array.isArray(items)) return [];
   return items.map((it) => {
@@ -155,7 +182,7 @@ function normalizeItems(items) {
   });
 }
 
-async function computeTotalsFromDB(items, address) {
+async function computeTotalsFromDB(items, address, deliveryOverride) {
   const norm = normalizeItems(items).filter(
     (x) => x.productId && x.quantity > 0
   );
@@ -164,7 +191,7 @@ async function computeTotalsFromDB(items, address) {
   const productIds = [...new Set(norm.map((x) => x.productId))];
   const products = await productModel
     .find({ _id: { $in: productIds } })
-    .select("_id name price discount")
+    .select("_id name price discount image")
     .lean();
   const pmap = new Map(products.map((p) => [String(p._id), p]));
 
@@ -202,14 +229,20 @@ async function computeTotalsFromDB(items, address) {
       unitFinal,
       lineSubtotal,
       xxlSurchargeApplied,
+      image: Array.isArray(prod.image) ? prod.image : [],
     });
   }
 
-  const { fee: deliveryFee, label: deliveryLabel } =
-    computeDeliveryFee(address);
-  const computedAmount = subtotal + deliveryFee;
+  const feeMeta = resolveDeliveryFee(address, deliveryOverride);
+  const computedAmount = subtotal + feeMeta.fee;
 
-  return { computedAmount, deliveryFee, deliveryLabel, lines };
+  return {
+    computedAmount,
+    deliveryFee: feeMeta.fee,
+    deliveryLabel: feeMeta.label,
+    lines,
+    feeSource: feeMeta.via,
+  };
 }
 
 /** Map an order status to a progress % and step name for UI. */
@@ -237,7 +270,7 @@ function getOrderProgress(status) {
 
 /** Provide a simple ETA window based on area & status (best-effort). */
 function estimateDeliveryWindow(address, status) {
-  const { label } = computeDeliveryFee(address || {});
+  const { label } = computeDeliveryFeeFromAddress(address || {});
   const base =
     label === "Dhaka"
       ? [1, 3]
@@ -332,7 +365,7 @@ function applyProfileFields(user, { name, address }) {
     if (recipientName && phone && addressLine1 && district) {
       user.address = {
         recipientName,
-        phone,
+        phone: normalizeBDPhone(phone),
         addressLine1,
         district,
       };
@@ -364,13 +397,19 @@ async function ensureAccountByPhone(phone, name, address) {
 const placeOrder = async (req, res) => {
   try {
     // Accept unauthenticated checkout with phone
-    const { phone, name, items, address } = req.body || {};
+    const { phone, name, items, address, deliveryOverride } = req.body || {};
 
     if (!phone) {
       return res
         .status(400)
         .json({ success: false, message: "phone is required" });
     }
+
+    // Normalize phone into address before validation/save
+    if (address && address.phone) {
+      address.phone = normalizeBDPhone(address.phone);
+    }
+
     const addrError = validateBdAddress(address);
     if (addrError) {
       return res.status(400).json({ success: false, message: addrError });
@@ -384,7 +423,8 @@ const placeOrder = async (req, res) => {
     );
     const userId = user._id;
 
-    const { computedAmount, lines } = await computeTotalsFromDB(items, address);
+    const { computedAmount, lines, deliveryFee, deliveryLabel, feeSource } =
+      await computeTotalsFromDB(items, address, deliveryOverride);
 
     const newOrder = await orderModel.create({
       userId,
@@ -395,6 +435,11 @@ const placeOrder = async (req, res) => {
       payment: false,
       date: Date.now(),
       status: "Order Placed",
+      deliveryMeta: {
+        fee: deliveryFee,
+        label: deliveryLabel,
+        source: feeSource, // "override" | "address"
+      },
     });
 
     return res.json({
@@ -414,12 +459,17 @@ const placeOrder = async (req, res) => {
 // ----------------------- SSLCommerz -----------------------
 const initiateSslPayment = async (req, res) => {
   try {
-    const { phone, name, items, address } = req.body || {};
+    const { phone, name, items, address, deliveryOverride } = req.body || {};
     if (!phone) {
       return res
         .status(400)
         .json({ success: false, message: "phone is required" });
     }
+
+    if (address && address.phone) {
+      address.phone = normalizeBDPhone(address.phone);
+    }
+
     const addrError = validateBdAddress(address);
     if (addrError) {
       return res.status(400).json({ success: false, message: addrError });
@@ -433,7 +483,8 @@ const initiateSslPayment = async (req, res) => {
     );
     const userId = user._id;
 
-    const { computedAmount, lines } = await computeTotalsFromDB(items, address);
+    const { computedAmount, lines, deliveryFee, deliveryLabel, feeSource } =
+      await computeTotalsFromDB(items, address, deliveryOverride);
 
     const newOrder = await orderModel.create({
       userId,
@@ -444,6 +495,11 @@ const initiateSslPayment = async (req, res) => {
       payment: false,
       status: "Order Placed",
       date: Date.now(),
+      deliveryMeta: {
+        fee: deliveryFee,
+        label: deliveryLabel,
+        source: feeSource,
+      },
     });
 
     const tran_id = generateTransactionId();
@@ -577,13 +633,18 @@ const sslIpn = async (_req, res) => {
 // ----------------------- bKash Hosted (Normal) Checkout -----------------------
 const bkashCreatePayment = async (req, res) => {
   try {
-    const { phone, name, items, address } = req.body || {};
+    const { phone, name, items, address, deliveryOverride } = req.body || {};
 
     if (!phone) {
       return res
         .status(400)
         .json({ success: false, message: "phone is required" });
     }
+
+    if (address && address.phone) {
+      address.phone = normalizeBDPhone(address.phone);
+    }
+
     const addrError = validateBdAddress(address);
     if (addrError) {
       return res.status(400).json({ success: false, message: addrError });
@@ -597,7 +658,8 @@ const bkashCreatePayment = async (req, res) => {
     );
     const userId = user._id;
 
-    const { computedAmount, lines } = await computeTotalsFromDB(items, address);
+    const { computedAmount, lines, deliveryFee, deliveryLabel, feeSource } =
+      await computeTotalsFromDB(items, address, deliveryOverride);
 
     // Create pending order
     const order = await orderModel.create({
@@ -609,6 +671,11 @@ const bkashCreatePayment = async (req, res) => {
       payment: false,
       status: "Order Placed",
       date: Date.now(),
+      deliveryMeta: {
+        fee: deliveryFee,
+        label: deliveryLabel,
+        source: feeSource,
+      },
     });
 
     const headers = await bkashHostedHeaders();
@@ -804,7 +871,7 @@ const updateOrderAddress = async (req, res) => {
 
     order.address = {
       recipientName: address.recipientName,
-      phone: address.phone,
+      phone: normalizeBDPhone(address.phone),
       addressLine1: address.addressLine1,
       district: address.district,
     };
