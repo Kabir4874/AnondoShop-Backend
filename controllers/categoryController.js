@@ -3,13 +3,24 @@ import { v2 as cloudinary } from "cloudinary";
 import sharp from "sharp";
 import Category from "../models/categoryModel.js";
 
-/* ----------------- helpers ----------------- */
-const slugify = (str) =>
-  String(str || "")
+// Unicode-safe slugify that works in environments without \p{…} regex.
+// Keeps Bangla (U+0980–U+09FF), Bangla digits (U+09E6–U+09EF), and Latin a–z/0–9.
+// Everything else becomes "-", then trims/collapses dashes. Falls back if empty.
+const slugify = (str) => {
+  const base = String(str || "").trim();
+  if (!base) return "";
+
+  let slug = base
     .toLowerCase()
-    .trim()
-    .replace(/[\s\W-]+/g, "-")
+    .normalize("NFKD")
+    .replace(/[\u200C\u200D]/g, "") // strip zero-width joiners
+    .replace(/[^a-z0-9\u0980-\u09FF\u09E6-\u09EF]+/g, "-") // keep Bangla & Latin
+    .replace(/-+/g, "-")
     .replace(/^-+|-+$/g, "");
+
+  if (!slug) slug = `cat-${Date.now().toString(36)}`;
+  return slug;
+};
 
 /**
  * Optimize the image in memory with sharp, then upload to Cloudinary.
