@@ -1,4 +1,3 @@
-// backend/controllers/analyticsController.js
 import axios from "axios";
 import crypto from "crypto";
 import MarketingConfig from "../models/marketingConfigModel.js";
@@ -26,10 +25,10 @@ async function sendFacebookEvent({
   return data;
 }
 
-async function sendTikTokEvent({ pixelId, accessToken, event }) {
+async function sendTikTokEvent({ accessToken, event }) {
   const url = "https://business-api.tiktok.com/open_api/v1.3/pixel/track/";
   const payload = {
-    pixel_code: pixelId,
+    pixel_code: event.pixel_code, // set below
     event: event.event_name,
     event_id: event.event_id,
     timestamp: event.timestamp,
@@ -47,25 +46,12 @@ async function sendTikTokEvent({ pixelId, accessToken, event }) {
   return data;
 }
 
-/**
- * POST /api/analytics/track
- * Body:
- * {
- *   provider: "facebook" | "tiktok" | "both",
- *   eventName: "Purchase" | "AddToCart" | "PageView" | ...,
- *   eventId: "uuid-123",
- *   email, phone,
- *   value, currency, content_ids[], content_name,
- *   userAgent?, ip?
- * }
- */
 export const trackServerEvent = async (req, res) => {
   try {
     const {
       provider = "both",
       eventName = "PageView",
       eventId,
-      email,
       phone,
       value,
       currency = "BDT",
@@ -102,7 +88,6 @@ export const trackServerEvent = async (req, res) => {
         event_time: Math.floor(Date.now() / 1000),
         event_id: eventId,
         user_data: {
-          em: email ? [sha256(email)] : undefined,
           ph: phone ? [sha256(phone)] : undefined,
           client_ip_address: ipAddr,
           client_user_agent: ua,
@@ -136,15 +121,18 @@ export const trackServerEvent = async (req, res) => {
       cfg.tiktokAccessToken &&
       (provider === "tiktok" || provider === "both")
     ) {
+      const hashedPhone = phone ? sha256(phone) : undefined;
+
       const tkEvent = {
+        pixel_code: cfg.tiktokPixelId,
         event_name: eventName,
         event_id: eventId,
         timestamp: Math.floor(Date.now() / 1000),
         context: {
           page: { url: req.headers?.referer || "" },
           user: {
-            external_id: email ? sha256(email) : undefined,
-            phone_number: phone ? sha256(phone) : undefined,
+            external_id: hashedPhone,
+            phone_number: hashedPhone,
             ip: ipAddr,
             user_agent: ua,
           },
@@ -160,7 +148,6 @@ export const trackServerEvent = async (req, res) => {
 
       try {
         result.tiktok = await sendTikTokEvent({
-          pixelId: cfg.tiktokPixelId,
           accessToken: cfg.tiktokAccessToken,
           event: tkEvent,
         });
