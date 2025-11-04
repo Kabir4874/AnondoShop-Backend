@@ -340,30 +340,24 @@ const getUserProfile = async (req, res) => {
   }
 };
 
-// === Admin Login (env-based) ===
-
-/**
- * POST /api/auth/admin/login
- * body: { email, password }
- * Uses env ADMIN_EMAIL / ADMIN_PASSWORD
- */
 const loginAdmin = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password } = req.body || {};
 
     if (
       email === process.env.ADMIN_EMAIL &&
       password === process.env.ADMIN_PASSWORD
     ) {
-      const token = jwt.sign(email + password, process.env.JWT_SECRET, {
+      // IMPORTANT FIX: sign an OBJECT payload when using expiresIn
+      const token = jwt.sign({ role: "admin", email }, process.env.JWT_SECRET, {
         expiresIn: "30d",
       });
-      res.status(200).json({ success: true, token });
-    } else {
-      res
-        .status(400)
-        .json({ success: false, message: "Invalid email or password" });
+      return res.status(200).json({ success: true, token });
     }
+
+    return res
+      .status(400)
+      .json({ success: false, message: "Invalid email or password" });
   } catch (error) {
     console.log("Error while logging in admin: ", error);
     res.status(500).json({ success: false, message: error.message });
