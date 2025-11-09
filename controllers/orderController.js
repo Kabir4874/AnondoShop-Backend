@@ -1,6 +1,7 @@
 // controllers/orderController.js
 import axios from "axios";
 import jwt from "jsonwebtoken";
+import mongoose from "mongoose";
 import SSLCommerzPayment from "sslcommerz-lts";
 import orderModel from "../models/orderModel.js";
 import productModel from "../models/productModel.js";
@@ -769,13 +770,74 @@ const bkashCallback = async (req, res) => {
 };
 
 // ----------------------- Lists & Updates -----------------------
-const allOrders = async (_req, res) => {
+const allOrders = async (req, res) => {
   try {
-    const orders = await orderModel.find({}).sort({ date: -1 });
-    res.json({ success: true, orders });
+    const {
+      status,
+      dateFrom,
+      dateTo,
+      search,
+      sort = "date_desc",
+    } = req.body || {};
+
+    const q = {};
+
+    // Status filter
+    if (status && status !== "All") {
+      q.status = status;
+    }
+
+    // Date range filter (inclusive, local-date strings "YYYY-MM-DD")
+    if (dateFrom || dateTo) {
+      const range = {};
+      if (dateFrom) {
+        // start of day UTC
+        range.$gte = new Date(`${dateFrom}T00:00:00.000Z`);
+      }
+      if (dateTo) {
+        // end of day UTC
+        range.$lte = new Date(`${dateTo}T23:59:59.999Z`);
+      }
+      q.date = range;
+    }
+
+    // Search (recipient name / phone / exact orderId if valid)
+    if (search && String(search).trim()) {
+      const s = String(search).trim();
+      const ors = [
+        { "address.recipientName": { $regex: s, $options: "i" } },
+        { "address.phone": { $regex: s.replace(/^\+?88/, ""), $options: "i" } },
+        {
+          "address.phone": {
+            $regex: `\\+?88${s.replace(/^\+?88/, "")}`,
+            $options: "i",
+          },
+        },
+      ];
+
+      if (mongoose.Types.ObjectId.isValid(s)) {
+        ors.push({ _id: new mongoose.Types.ObjectId(s) });
+      }
+
+      q.$or = ors;
+    }
+
+    // Sort mapping
+    const sortMap = {
+      date_desc: { date: -1 },
+      date_asc: { date: 1 },
+      amount_desc: { amount: -1 },
+      amount_asc: { amount: 1 },
+      status_asc: { status: 1 },
+      status_desc: { status: -1 },
+    };
+    const sortObj = sortMap[sort] || { date: -1 };
+
+    const orders = await orderModel.find(q).sort(sortObj);
+    return res.json({ success: true, orders });
   } catch (error) {
     console.log(error);
-    res.json({ success: false, message: error.message });
+    return res.json({ success: false, message: error.message });
   }
 };
 
