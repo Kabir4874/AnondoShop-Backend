@@ -1,5 +1,5 @@
 import { v2 as cloudinary } from "cloudinary";
-import sharp from "sharp";
+import Jimp from "jimp";
 import { Banner, Headline } from "../models/contentModels.js";
 
 cloudinary.config({
@@ -32,16 +32,11 @@ const uploadImageToCloudinary = async (
       throw new Error("Invalid file data");
     }
 
-    const optimizedBuffer = await sharp(fileBuffer)
-      .rotate()
-      .resize({
-        width: 1200,
-        height: 600,
-        fit: "cover",
-        withoutEnlargement: true,
-      })
-      .jpeg({ quality: 85, progressive: true })
-      .toBuffer();
+    const image = await Jimp.read(fileBuffer);
+    image.exifRotate();
+    image.cover(1200, 600, Jimp.HORIZONTAL_ALIGN_CENTER | Jimp.VERTICAL_ALIGN_MIDDLE);
+    image.quality(85);
+    const optimizedBuffer = await image.getBufferAsync(Jimp.MIME_JPEG);
 
     return new Promise((resolve, reject) => {
       const uploadStream = cloudinary.uploader.upload_stream(

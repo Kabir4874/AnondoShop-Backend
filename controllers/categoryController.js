@@ -1,6 +1,6 @@
 // controllers/categoryController.js
 import { v2 as cloudinary } from "cloudinary";
-import sharp from "sharp";
+import Jimp from "jimp";
 import Category from "../models/categoryModel.js";
 
 // Unicode-safe slugify that works in environments without \p{…} regex.
@@ -23,7 +23,7 @@ const slugify = (str) => {
 };
 
 /**
- * Optimize the image in memory with sharp, then upload to Cloudinary.
+ * Optimize the image in memory with Jimp, then upload to Cloudinary.
  * - Auto rotate (EXIF)
  * - Max width 1600 (no enlarge)
  * - JPEG 82 quality
@@ -34,12 +34,14 @@ const uploadBufferToCloudinary = async (file) => {
     throw new Error("Invalid image file");
   }
 
-  // Optimize with sharp
-  const optimized = await sharp(file.buffer)
-    .rotate()
-    .resize({ width: 1600, withoutEnlargement: true })
-    .jpeg({ quality: 82 })
-    .toBuffer();
+  // Optimize with Jimp
+  const image = await Jimp.read(file.buffer);
+  image.exifRotate();
+  if (image.getWidth() > 1600) {
+    image.resize(1600, Jimp.AUTO);
+  }
+  image.quality(82);
+  const optimized = await image.getBufferAsync(Jimp.MIME_JPEG);
 
   // Upload via stream (handles large buffers)
   return new Promise((resolve, reject) => {
