@@ -71,7 +71,7 @@ async function bkashGrantTokenHosted() {
           password: BKASH_PASSWORD,
         },
         timeout: 15000,
-      }
+      },
     );
 
     if (!data?.id_token) {
@@ -185,7 +185,7 @@ function normalizeItems(items) {
 
 async function computeTotalsFromDB(items, address, deliveryOverride) {
   const norm = normalizeItems(items).filter(
-    (x) => x.productId && x.quantity > 0
+    (x) => x.productId && x.quantity > 0,
   );
   if (norm.length === 0) throw new Error("No valid items provided");
 
@@ -276,15 +276,15 @@ function estimateDeliveryWindow(address, status) {
     label === "Dhaka"
       ? [1, 3]
       : label === "Gazipur" || label === "Savar/Ashulia"
-      ? [2, 4]
-      : [3, 7];
+        ? [2, 4]
+        : [3, 7];
 
   const s = String(status || "").toLowerCase();
   const tweak = s.includes("out for delivery")
     ? [0, 1]
     : s.includes("shipped")
-    ? [1, 2]
-    : [0, 0];
+      ? [1, 2]
+      : [0, 0];
 
   const minDays = Math.max(1, base[0] - tweak[0]);
   const maxDays = Math.max(minDays, base[1] - tweak[1]);
@@ -420,7 +420,7 @@ const placeOrder = async (req, res) => {
     const { user, token, passwordSet } = await ensureAccountByPhone(
       phone,
       name,
-      address
+      address,
     );
     const userId = user._id;
 
@@ -480,7 +480,7 @@ const initiateSslPayment = async (req, res) => {
     const { user, token, passwordSet } = await ensureAccountByPhone(
       phone,
       name,
-      address
+      address,
     );
     const userId = user._id;
 
@@ -581,7 +581,7 @@ const sslSuccess = async (req, res) => {
       });
     }
     return res.redirect(
-      `${CLIENT_URL}/payment-result?status=success&orderId=${orderId || ""}`
+      `${CLIENT_URL}/payment-result?status=success&orderId=${orderId || ""}`,
     );
   } catch (error) {
     console.log(error);
@@ -596,7 +596,7 @@ const sslFail = async (req, res) => {
       await orderModel.findByIdAndUpdate(orderId, { status: "Payment Failed" });
     }
     return res.redirect(
-      `${CLIENT_URL}/payment-result?status=failed&orderId=${orderId || ""}`
+      `${CLIENT_URL}/payment-result?status=failed&orderId=${orderId || ""}`,
     );
   } catch (error) {
     console.log(error);
@@ -613,7 +613,7 @@ const sslCancel = async (req, res) => {
       });
     }
     return res.redirect(
-      `${CLIENT_URL}/payment-result?status=cancelled&orderId=${orderId || ""}`
+      `${CLIENT_URL}/payment-result?status=cancelled&orderId=${orderId || ""}`,
     );
   } catch (error) {
     console.log(error);
@@ -655,7 +655,7 @@ const bkashCreatePayment = async (req, res) => {
     const { user, token, passwordSet } = await ensureAccountByPhone(
       phone,
       name,
-      address
+      address,
     );
     const userId = user._id;
 
@@ -702,7 +702,7 @@ const bkashCreatePayment = async (req, res) => {
   } catch (error) {
     console.error(
       "bkashCreatePayment (Hosted):",
-      error?.response?.data || error.message
+      error?.response?.data || error.message,
     );
     return res.status(500).json({
       success: false,
@@ -727,7 +727,7 @@ const bkashCallback = async (req, res) => {
       return res.redirect(
         `${CLIENT_URL}/payment-result?status=failed${
           orderId ? `&orderId=${orderId}` : ""
-        }`
+        }`,
       );
     }
 
@@ -737,7 +737,7 @@ const bkashCallback = async (req, res) => {
     const { data: exec } = await axios.post(
       BKASH_CHECKOUT_EXECUTE_URL,
       execBody,
-      { headers, timeout: 20000 }
+      { headers, timeout: 20000 },
     );
 
     if (exec?.statusCode === "0000") {
@@ -751,7 +751,7 @@ const bkashCallback = async (req, res) => {
       return res.redirect(
         `${CLIENT_URL}/payment-result?status=success${
           orderId ? `&orderId=${orderId}` : ""
-        }`
+        }`,
       );
     }
 
@@ -761,7 +761,7 @@ const bkashCallback = async (req, res) => {
     return res.redirect(
       `${CLIENT_URL}/payment-result?status=failed${
         orderId ? `&orderId=${orderId}` : ""
-      }`
+      }`,
     );
   } catch (e) {
     console.error("bkashCallback (Hosted):", e?.response?.data || e.message);
@@ -833,8 +833,44 @@ const allOrders = async (req, res) => {
     };
     const sortObj = sortMap[sort] || { date: -1 };
 
-    const orders = await orderModel.find(q).sort(sortObj);
-    return res.json({ success: true, orders });
+    const orders = await orderModel.find(q).sort(sortObj).lean();
+
+    // Populate product images for all orders
+    const idSet = new Set();
+    for (const o of orders) {
+      const items = Array.isArray(o.items) ? o.items : [];
+      for (const it of items) {
+        const pid = String(it.productId || it._id || it.id || "").trim();
+        if (pid) idSet.add(pid);
+      }
+    }
+
+    let productMap = new Map();
+    if (idSet.size > 0) {
+      const ids = [...idSet];
+      const products = await productModel
+        .find({ _id: { $in: ids } })
+        .select("_id image")
+        .lean();
+
+      productMap = new Map(products.map((p) => [String(p._id), p.image]));
+    }
+
+    const ordersWithImages = orders.map((o) => {
+      const items = Array.isArray(o.items) ? o.items : [];
+      const enrichedItems = items.map((it) => {
+        const pid = String(it.productId || it._id || it.id || "").trim();
+        const existingImage = it.image;
+        const productImage = productMap.get(pid);
+        return {
+          ...it,
+          image: existingImage != null ? existingImage : productImage || [],
+        };
+      });
+      return { ...o, items: enrichedItems };
+    });
+
+    return res.json({ success: true, orders: ordersWithImages });
   } catch (error) {
     console.log(error);
     return res.json({ success: false, message: error.message });
@@ -978,7 +1014,7 @@ const courierCheck = async (req, res) => {
           "Content-Type": "application/json",
         },
         timeout: 15000,
-      }
+      },
     );
 
     return res.status(200).json({ success: true, data: response.data });
@@ -1046,7 +1082,7 @@ const trackOrderLookup = async (req, res) => {
 
     const orderPhone = String(order?.address?.phone || "").replace(
       /^\+?88/,
-      ""
+      "",
     );
     if (!orderPhone || orderPhone !== normPhone) {
       return res
