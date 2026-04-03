@@ -25,7 +25,7 @@ function parsePagination({ page = 1, limit = 20, max = 100 }) {
 const uploadImageToCloudinary = async (
   fileBuffer,
   mimetype,
-  folder = "banners"
+  folder = "banners",
 ) => {
   try {
     if (!fileBuffer || !mimetype) {
@@ -33,8 +33,11 @@ const uploadImageToCloudinary = async (
     }
 
     const image = await Jimp.read(fileBuffer);
-    image.exifRotate();
-    image.cover(1200, 600, Jimp.HORIZONTAL_ALIGN_CENTER | Jimp.VERTICAL_ALIGN_MIDDLE);
+    image.cover(
+      1200,
+      600,
+      Jimp.HORIZONTAL_ALIGN_CENTER | Jimp.VERTICAL_ALIGN_MIDDLE,
+    );
     image.quality(85);
     const optimizedBuffer = await image.getBufferAsync(Jimp.MIME_JPEG);
 
@@ -56,7 +59,7 @@ const uploadImageToCloudinary = async (
               publicId: result.public_id,
             });
           }
-        }
+        },
       );
 
       uploadStream.end(optimizedBuffer);
@@ -190,7 +193,7 @@ export const createBanner = async (req, res) => {
     const imageData = await uploadImageToCloudinary(
       req.file.buffer,
       req.file.mimetype,
-      "banners"
+      "banners",
     );
 
     const isActive = parseBool(req.body?.isActive, true);
@@ -254,7 +257,7 @@ export const updateBanner = async (req, res) => {
         const newImageData = await uploadImageToCloudinary(
           req.file.buffer,
           req.file.mimetype,
-          "banners"
+          "banners",
         );
 
         updateData.image = {
