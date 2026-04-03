@@ -36,7 +36,6 @@ const uploadBufferToCloudinary = async (file) => {
 
   // Optimize with Jimp
   const image = await Jimp.read(file.buffer);
-  image.exifRotate();
   if (image.getWidth() > 1600) {
     image.resize(1600, Jimp.AUTO);
   }
@@ -53,7 +52,7 @@ const uploadBufferToCloudinary = async (file) => {
       (err, result) => {
         if (err) return reject(err);
         resolve({ url: result.secure_url, publicId: result.public_id });
-      }
+      },
     );
     stream.end(optimized);
   });
